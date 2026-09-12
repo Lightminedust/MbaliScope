@@ -86,6 +86,14 @@ These are stated because the alternative is a map that lies:
 
 On Windows, use `gradlew.bat`.
 
+To create a self-contained Windows application with the MbaliScope icon:
+
+```powershell
+.\gradlew.bat :app:packageWindows
+```
+
+The executable is written to `app\build\jpackage\MbaliScope\MbaliScope.exe`.
+
 > **Note on the Gradle configuration cache.** The `run` task is explicitly declared
 > incompatible with it, because `org.openjfx.javafxplugin` 0.1.0 (its last release)
 > reads the project at execution time. The cache entry is discarded for that task only;

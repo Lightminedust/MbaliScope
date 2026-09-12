@@ -6,21 +6,26 @@ import java.util.EnumSet;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 import org.mbali.model.Device;
 import org.mbali.model.DeviceType;
 import org.mbali.model.NetworkLink;
 import org.mbali.model.NetworkTopology;
+import org.mbali.service.LivePulse;
 import org.mbali.service.NetworkScanner;
 import org.mbali.service.NetworkScanner.Subnet;
 import org.mbali.service.SystemScanner;
+import org.mbali.view.AppIcon;
 import org.mbali.view.Camera;
 import org.mbali.view.ConstellationLayout;
 import org.mbali.view.ConstellationLayout.Constellation;
 import org.mbali.view.ConstellationLayout.SatelliteKind;
 import org.mbali.view.ConstellationRenderer;
 import org.mbali.view.ConstellationRenderer.Filter;
+import org.mbali.view.ConstellationRenderer.Loading;
+import org.mbali.view.WindowChrome;
 
 import javafx.animation.AnimationTimer;
 import javafx.application.Application;
@@ -34,7 +39,9 @@ import javafx.scene.control.ToggleButton;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Pane;
 import javafx.scene.layout.VBox;
+import javafx.scene.paint.Color;
 import javafx.stage.Stage;
+import javafx.stage.StageStyle;
 
 public class App extends Application {
 
@@ -75,6 +82,18 @@ public class App extends Application {
     private final List<Device> discovered = new ArrayList<>();
     private Constellation constellation;
     private String statusText = "Analyse de la machine locale...";
+    private Loading loading = Loading.indeterminate(
+            "Analyse du système", "Inventaire de la machine locale");
+
+    private WindowChrome chrome;
+    private final LivePulse pulse = new LivePulse();
+    private final List<Double> latencies = new ArrayList<>();
+    private static final int LATENCY_HISTORY = 40;
+
+    // Lus par le thread du battement, écrits par le thread graphique : d'où les
+    // références atomiques plutôt qu'un champ ordinaire.
+    private final AtomicReference<String> liveGateway = new AtomicReference<>();
+    private final AtomicReference<String> liveLocalAddress = new AtomicReference<>("");
 
     private double mouseX;
     private double mouseY;
@@ -94,6 +113,11 @@ public class App extends Application {
 
         installControls();
 
+        // Sans décoration système, la fenêtre porte ses propres commandes ; en
+        // contrepartie, déplacement et agrandissement sont refaits à la main.
+        primaryStage.initStyle(StageStyle.UNDECORATED);
+        chrome = new WindowChrome(primaryStage);
+
         long startNanos = System.nanoTime();
         AnimationTimer timer = new AnimationTimer() {
             private long previousNanos = startNanos;
@@ -109,17 +133,69 @@ public class App extends Application {
                 renderer.draw(gc, constellation, camera,
                         canvas.getWidth(), canvas.getHeight(), seconds,
                         mouseX, mouseY, mouseInside, statusText, selectedId,
-                        new Filter(query, visibleKinds));
+                        new Filter(query, visibleKinds), loading);
             }
         };
         timer.start();
 
         primaryStage.setTitle("Mbaliscope - Constellation Réseau");
-        primaryStage.setScene(new Scene(root, WIDTH, HEIGHT));
+        Scene scene = new Scene(root, WIDTH, HEIGHT);
+        // Le fond de scène évite l'éclair blanc entre l'ouverture et la première image
+        scene.setFill(Color.web("#070914"));
+        primaryStage.setScene(scene);
+
+        // La même marque est fournie à toutes les tailles utiles afin que la fenêtre,
+        // la barre des tâches et le sélecteur d'applications restent cohérents.
+        primaryStage.getIcons().setAll(AppIcon.allSizes());
+        AppIcon.installDesktopIcon();
+
         installMonitor(root);
+        installChrome(root);
+        chrome.fillScreen();
         primaryStage.show();
-        primaryStage.setOnCloseRequest(event -> cancelScan(false));
+        primaryStage.setOnCloseRequest(event -> shutdown());
         refreshScan();
+        startLivePulse();
+    }
+
+    /** La barre de fenêtre : zone de déplacement à gauche, commandes à droite. */
+    private void installChrome(Pane root) {
+        Pane bar = chrome.titleBar();
+        HBox buttons = chrome.buttons();
+        buttons.layoutXProperty().bind(root.widthProperty().subtract(buttons.widthProperty()).subtract(8));
+        buttons.setLayoutY(0);
+        root.getChildren().addAll(bar, buttons);
+    }
+
+    /**
+     * Le battement : une mesure réelle toutes les six secondes, publiée sur le thread
+     * graphique. La passerelle est relue à chaque tour, car elle n'est connue qu'après
+     * le premier balayage.
+     */
+    private void startLivePulse() {
+        pulse.start(liveGateway::get,
+                () -> localHost == null ? "" : liveLocalAddress.get(),
+                sample -> Platform.runLater(() -> publishPulse(sample)),
+                6_000);
+    }
+
+    private void publishPulse(LivePulse.Sample sample) {
+        latencies.add(sample.latencyMs() < 0 ? 0 : (double) sample.latencyMs());
+        while (latencies.size() > LATENCY_HISTORY) {
+            latencies.remove(0);
+        }
+        double[] history = new double[latencies.size()];
+        for (int i = 0; i < history.length; i++) {
+            history[i] = latencies.get(i);
+        }
+        renderer.setPulse(new ConstellationRenderer.Pulse(
+                sample.latencyMs(), sample.neighbours(),
+                System.currentTimeMillis() - sample.atMillis(), history));
+    }
+
+    private void shutdown() {
+        pulse.stop();
+        cancelScan(false);
     }
 
     /** Le moniteur : balayage, recherche, et un interrupteur par famille. */
@@ -148,7 +224,8 @@ public class App extends Application {
 
         VBox monitor = new VBox(8, scanRow, search, familyRow);
         monitor.setLayoutX(24);
-        monitor.setLayoutY(20);
+        // Sous la barre de fenêtre, qui occupe désormais le haut
+        monitor.setLayoutY(WindowChrome.BAR_HEIGHT + 14);
         root.getChildren().add(monitor);
     }
 
@@ -213,6 +290,8 @@ public class App extends Application {
         scanCancelled = token;
         selectedId = null;
         statusText = "Analyse de la machine locale…";
+        loading = Loading.indeterminate(
+                "Analyse du système", "Inventaire de la machine locale");
         refreshButton.setDisable(true);
         cancelButton.setDisable(false);
         scanThread = Thread.ofVirtual().name("scan-localhost").start(() -> {
@@ -233,6 +312,8 @@ public class App extends Application {
 
     /** Balaye le réseau local et fait apparaître chaque appareil dès qu'il est trouvé. */
     private void scanNetwork(AtomicBoolean token) {
+        loading = Loading.indeterminate(
+                "Cartographie du réseau", "Détection du sous-réseau et de la route par défaut");
         scanThread = Thread.ofVirtual().name("scan-lan").start(() -> {
             try {
                 Subnet subnet;
@@ -247,8 +328,12 @@ public class App extends Application {
                 int total = (int) NetworkScanner.hostAddresses(subnet).stream()
                         .filter(ip -> !ip.equals(subnet.localAddress())).count();
                 int progressStep = Math.max(1, total / 400);
-                Platform.runLater(() -> statusText = "Balayage " + subnet.localAddress() + "/"
-                        + subnet.prefixLength() + " : 0/" + total);
+                Platform.runLater(() -> {
+                    statusText = "Balayage " + subnet.localAddress() + "/"
+                            + subnet.prefixLength() + " : 0/" + total;
+                    loading = Loading.progress("Balayage du réseau",
+                            "0 / " + total + " adresses examinées", 0);
+                });
 
                 NetworkScanner.scan(subnet,
                         device -> Platform.runLater(() -> publishDevice(token, device)),
@@ -258,6 +343,9 @@ public class App extends Application {
                                     if (!token.get()) {
                                         statusText = "Balayage réseau : " + done + "/" + total
                                                 + "     " + discovered.size() + " appareil(s)";
+                                        loading = Loading.progress("Balayage du réseau",
+                                                done + " / " + total + " adresses examinées",
+                                                total == 0 ? 1 : done / (double) total);
                                     }
                                 });
                             }
@@ -271,6 +359,8 @@ public class App extends Application {
                     CompletableFuture<List<Device>> snapshot = new CompletableFuture<>();
                     Platform.runLater(() -> {
                         statusText = "Identification des appareils…";
+                        loading = Loading.indeterminate("Identification",
+                                discovered.size() + " appareil(s) à nommer");
                         snapshot.complete(new ArrayList<>(discovered));
                     });
                     // Le paramètre attendu ici est la passerelle, et non l'adresse
@@ -310,6 +400,7 @@ public class App extends Application {
 
     private void finishScan(String text) {
         statusText = text;
+        loading = null;
         if (refreshButton != null) refreshButton.setDisable(false);
         if (cancelButton != null) cancelButton.setDisable(true);
     }
@@ -369,6 +460,9 @@ public class App extends Application {
             rebuilt.addLink(new NetworkLink(hub, device, relation(device)));
         }
         constellation = ConstellationLayout.compute(rebuilt);
+        // Le battement lit ces deux valeurs depuis son propre thread.
+        liveGateway.set(hub.equals(localHost) ? null : hub.getIpAddress());
+        liveLocalAddress.set(localHost.getIpAddress());
         frameIfUntouched();
     }
 
@@ -402,7 +496,22 @@ public class App extends Application {
         camera.centerOn(0, 0, constellation.totalRadius(), width, height, FIT_MARGIN);
     }
 
+    /**
+     * JavaFX appelle toujours cette méthode à l'extinction, quel que soit le chemin.
+     *
+     * setOnCloseRequest, lui, ne se déclenche que sur une demande du gestionnaire de
+     * fenêtres. Depuis que la fenêtre est sans décoration et que notre bouton appelle
+     * stage.close(), il ne passait plus : le battement et le balayage n'étaient donc
+     * plus arrêtés explicitement. Sans conséquence visible — les threads virtuels sont
+     * démons et la JVM s'éteint — mais c'est un nettoyage qui ne s'exécutait pas.
+     */
+    @Override
+    public void stop() {
+        shutdown();
+    }
+
     public static void main(String[] args) {
+        System.setProperty("apple.awt.application.name", "MbaliScope");
         launch(args);
     }
 }

@@ -62,6 +62,27 @@ public final class ConstellationRenderer {
         }
     }
 
+    /** État visible du travail de découverte en cours. Une progression négative est indéterminée. */
+    public record Loading(String title, String detail, double progress) {
+        public Loading {
+            title = title == null ? "" : title;
+            detail = detail == null ? "" : detail;
+            progress = Math.max(-1, Math.min(1, progress));
+        }
+
+        public static Loading indeterminate(String title, String detail) {
+            return new Loading(title, detail, -1);
+        }
+
+        public static Loading progress(String title, String detail, double progress) {
+            return new Loading(title, detail, progress);
+        }
+
+        boolean determinate() {
+            return progress >= 0;
+        }
+    }
+
     private static final Color NIGHT = Color.web("#070914");
     private static final Color NIGHT_DEEP = Color.web("#02040b");
     private static final Color GOLD = Color.web("#e4cda2");
@@ -125,6 +146,15 @@ public final class ConstellationRenderer {
     private final double[] fieldY = new double[260];
     private final double[] fieldSize = new double[260];
 
+    /**
+     * L'état du battement, tel que le rendu a besoin de le connaître. La vue ignore
+     * volontairement d'où il vient : elle ne dépend d'aucune classe de service.
+     */
+    public record Pulse(int latencyMs, int neighbours, long ageMillis, double[] history) {
+    }
+
+    private Pulse pulse;
+
     private final List<Target> targets = new ArrayList<>();
     private final List<Box> labelBoxes = new ArrayList<>();
     private final Map<SatelliteKind, int[]> census = new EnumMap<>(SatelliteKind.class);
@@ -140,7 +170,7 @@ public final class ConstellationRenderer {
 
     public void draw(GraphicsContext gc, Constellation map, Camera camera, double width, double height,
                      double seconds, double mouseX, double mouseY, boolean mouseInside,
-                     String statusText, String selectedId, Filter filter) {
+                     String statusText, String selectedId, Filter filter, Loading loading) {
         Filter active = filter == null ? Filter.all() : filter;
         double detail = ramp(camera.zoom(), DETAIL_FROM, DETAIL_TO);
 
@@ -176,11 +206,105 @@ public final class ConstellationRenderer {
             drawDeviceNames(gc, map, camera, seconds, width, height,
                     selectedId, shown == null ? null : shown.id(), active);
             drawMonitor(gc, width, active, detail);
+            drawLive(gc, width, seconds);
             if (shown != null) {
                 drawInspector(gc, shown, height);
             }
         }
+        if (loading != null) {
+            drawLoading(gc, width, height, seconds, loading,
+                    map == null || map.stars().isEmpty());
+        }
         drawHud(gc, width, height, statusText);
+        drawFrame(gc, width, height);
+    }
+
+    /** Le battement, publié depuis le thread graphique. */
+    public void setPulse(Pulse pulse) {
+        this.pulse = pulse;
+    }
+
+    /**
+     * L'indicateur temps réel : latence mesurée vers la passerelle et voisins connus.
+     *
+     * Le point vif respire au lieu de clignoter — un seuil dur produisait exactement
+     * le scintillement qu'on a passé du temps à supprimer sur la carte.
+     */
+    private void drawLive(GraphicsContext gc, double width, double seconds) {
+        Pulse state = pulse;
+        if (state == null) {
+            return;
+        }
+        double x = width - 216;
+        double y = 74 + 110;
+
+        double breath = .45 + .55 * (0.5 + 0.5 * Math.sin(seconds * 1.9));
+        gc.setFill((state.latencyMs() >= 0 ? CYAN : GOLD_DIM).deriveColor(0, 1, 1, breath));
+        gc.fillOval(x, y - 5, 7, 7);
+
+        gc.setFont(SMALL_FONT);
+        gc.setFill(TEXT_DIM);
+        gc.fillText("TEMPS RÉEL", x + 14, y);
+
+        gc.setTextAlign(TextAlignment.RIGHT);
+        gc.fillText(state.ageMillis() < 0 ? "" : "il y a " + state.ageMillis() / 1000 + " s",
+                x + 192, y);
+        gc.setTextAlign(TextAlignment.LEFT);
+
+        gc.setFill(TEXT);
+        gc.fillText(state.latencyMs() >= 0
+                ? "PASSERELLE  " + state.latencyMs() + " ms"
+                : "PASSERELLE  INJOIGNABLE", x, y + 18);
+        gc.setFill(TEXT_DIM);
+        gc.fillText("VOISINS CONNUS  " + state.neighbours(), x, y + 34);
+
+        drawSparkline(gc, x, y + 44, 192, 26, state.history());
+    }
+
+    /** La courbe des dernières mesures, normalisée sur la plus lente d'entre elles. */
+    private void drawSparkline(GraphicsContext gc, double x, double y,
+                               double width, double height, double[] history) {
+        if (history == null || history.length < 2) {
+            return;
+        }
+        double worst = 1;
+        for (double value : history) {
+            worst = Math.max(worst, value);
+        }
+        gc.setStroke(GOLD_DIM.deriveColor(0, 1, 1, .35));
+        gc.setLineWidth(1);
+        gc.strokeLine(x, y + height, x + width, y + height);
+
+        gc.setStroke(CYAN.deriveColor(0, 1, 1, .8));
+        gc.setLineWidth(1.4);
+        double step = width / (history.length - 1);
+        for (int i = 1; i < history.length; i++) {
+            double previous = history[i - 1] < 0 ? 0 : history[i - 1];
+            double current = history[i] < 0 ? 0 : history[i];
+            gc.strokeLine(x + (i - 1) * step, y + height - previous / worst * height,
+                    x + i * step, y + height - current / worst * height);
+        }
+    }
+
+    /**
+     * Le cadre de la fenêtre. Elle n'a plus de bordure système : ce filet et ses quatre
+     * équerres tiennent ce rôle, dans le trait gravé du reste de la carte.
+     */
+    private void drawFrame(GraphicsContext gc, double width, double height) {
+        gc.setStroke(GOLD_DIM.deriveColor(0, 1, 1, .55));
+        gc.setLineWidth(1);
+        gc.strokeRect(.5, .5, width - 1, height - 1);
+
+        gc.setStroke(GOLD.deriveColor(0, 1, 1, .7));
+        double tick = 16;
+        gc.strokeLine(.5, .5, tick, .5);
+        gc.strokeLine(.5, .5, .5, tick);
+        gc.strokeLine(width - tick, .5, width - .5, .5);
+        gc.strokeLine(width - .5, .5, width - .5, tick);
+        gc.strokeLine(.5, height - tick, .5, height - .5);
+        gc.strokeLine(.5, height - .5, tick, height - .5);
+        gc.strokeLine(width - tick, height - .5, width - .5, height - .5);
+        gc.strokeLine(width - .5, height - tick, width - .5, height - .5);
     }
 
     public String hitTest(Constellation map, Camera camera, double screenX, double screenY) {
@@ -740,6 +864,108 @@ public final class ConstellationRenderer {
         gc.setFont(SMALL_FONT);
         gc.setFill(TEXT_DIM);
         gc.fillText(ellipsize(target.detail(), 68), x, y + 18);
+    }
+
+    /**
+     * Astrolabe de chargement. Il occupe le centre tant que rien n'est encore connu,
+     * puis se replie en haut de la carte pendant le balayage et l'identification.
+     */
+    private void drawLoading(GraphicsContext gc, double width, double height, double seconds,
+                             Loading loading, boolean prominent) {
+        double x = width / 2;
+        double y = prominent ? height * .46 : 91;
+        double radius = prominent ? 58 : 31;
+        double panelWidth = prominent ? 330 : 290;
+        double panelTop = y - radius - 18;
+        double panelHeight = radius * 2 + 76;
+
+        gc.save();
+        gc.setFill(NIGHT_DEEP.deriveColor(0, 1, 1, prominent ? .76 : .84));
+        gc.fillRoundRect(x - panelWidth / 2, panelTop, panelWidth, panelHeight, 12, 12);
+        gc.setStroke(GOLD_DIM.deriveColor(0, 1, 1, .35));
+        gc.setLineWidth(1);
+        gc.strokeLine(x - panelWidth * .38, panelTop + panelHeight - 1,
+                x + panelWidth * .38, panelTop + panelHeight - 1);
+
+        double breath = .64 + .36 * (0.5 + 0.5 * Math.sin(seconds * 2.2));
+        gc.setStroke(GOLD_DIM.deriveColor(0, 1, 1, .72));
+        gc.strokeOval(x - radius, y - radius, radius * 2, radius * 2);
+        gc.setStroke(GOLD_DIM.deriveColor(0, 1, 1, .38));
+        gc.strokeOval(x - radius * .72, y - radius * .72, radius * 1.44, radius * 1.44);
+
+        // Deux fragments tournent en sens inverse : le système cherche puis recoupe.
+        gc.save();
+        gc.translate(x, y);
+        gc.rotate(seconds * 31);
+        gc.setStroke(GOLD.deriveColor(0, 1, 1, .9));
+        gc.setLineWidth(prominent ? 1.7 : 1.25);
+        gc.strokeArc(-radius * .88, -radius * .88, radius * 1.76, radius * 1.76,
+                18, 92, ArcType.OPEN);
+        gc.strokeArc(-radius * .88, -radius * .88, radius * 1.76, radius * 1.76,
+                198, 48, ArcType.OPEN);
+        gc.rotate(-seconds * 73);
+        gc.setStroke(CYAN.deriveColor(0, 1, 1, .82));
+        gc.strokeArc(-radius * .53, -radius * .53, radius * 1.06, radius * 1.06,
+                42, 118, ArcType.OPEN);
+        gc.restore();
+
+        // Une aiguille de radar et deux observations, reliées comme une constellation.
+        double sweep = seconds * 1.7 - Math.PI / 2;
+        double farX = x + Math.cos(sweep) * radius * .66;
+        double farY = y + Math.sin(sweep) * radius * .66;
+        gc.setStroke(CYAN.deriveColor(0, 1, 1, .24 + .24 * breath));
+        gc.setLineWidth(1);
+        gc.strokeLine(x, y, farX, farY);
+
+        double firstAngle = seconds * .72;
+        double secondAngle = firstAngle + Math.PI * 1.14;
+        double firstX = x + Math.cos(firstAngle) * radius * .88;
+        double firstY = y + Math.sin(firstAngle) * radius * .55;
+        double secondX = x + Math.cos(secondAngle) * radius * .88;
+        double secondY = y + Math.sin(secondAngle) * radius * .55;
+        gc.setStroke(GOLD_DIM.deriveColor(0, 1, 1, .52));
+        gc.strokeLine(firstX, firstY, secondX, secondY);
+        double dot = prominent ? 3.8 : 2.8;
+        gc.setFill(CYAN.deriveColor(0, 1, 1, breath));
+        gc.fillOval(firstX - dot, firstY - dot, dot * 2, dot * 2);
+        gc.setFill(GOLD);
+        gc.fillOval(secondX - dot, secondY - dot, dot * 2, dot * 2);
+
+        gc.setFill(GOLD);
+        double core = prominent ? 5 : 3.5;
+        gc.fillOval(x - core, y - core, core * 2, core * 2);
+        gc.setStroke(CYAN.deriveColor(0, 1, 1, .45 * breath));
+        gc.strokeOval(x - core * 2.2, y - core * 2.2, core * 4.4, core * 4.4);
+
+        // Le balayage possède une mesure réelle ; les autres phases restent fluides.
+        gc.setLineWidth(prominent ? 2.2 : 1.8);
+        if (loading.determinate()) {
+            gc.setStroke(CYAN.deriveColor(0, 1, 1, .9));
+            gc.strokeArc(x - radius - 5, y - radius - 5,
+                    (radius + 5) * 2, (radius + 5) * 2,
+                    90, -360 * loading.progress(), ArcType.OPEN);
+        } else {
+            gc.save();
+            gc.translate(x, y);
+            gc.rotate(-seconds * 46);
+            gc.setStroke(CYAN.deriveColor(0, 1, 1, .76));
+            gc.strokeArc(-radius - 5, -radius - 5,
+                    (radius + 5) * 2, (radius + 5) * 2,
+                    12, 72, ArcType.OPEN);
+            gc.restore();
+        }
+
+        gc.setTextAlign(TextAlignment.CENTER);
+        gc.setFont(TITLE_FONT);
+        gc.setFill(TEXT);
+        gc.fillText(loading.title().toUpperCase(Locale.ROOT), x, y + radius + 25);
+        if (!loading.detail().isBlank()) {
+            gc.setFont(SMALL_FONT);
+            gc.setFill(TEXT_DIM);
+            gc.fillText(ellipsize(loading.detail(), 46), x, y + radius + 43);
+        }
+        gc.setTextAlign(TextAlignment.LEFT);
+        gc.restore();
     }
 
     private void drawHud(GraphicsContext gc, double width, double height, String status) {
