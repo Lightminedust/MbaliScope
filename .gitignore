@@ -1,0 +1,41 @@
+# Gradle caches and generated output
+.gradle/
+build/
+.kotlin/
+
+# Java/JVM generated files
+*.class
+*.hprof
+*.jfr
+hs_err_pid*
+replay_pid*
+
+# IDE metadata
+.idea/
+.vscode/
+*.iml
+.classpath
+.project
+.settings/
+bin/
+out/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+local.properties
+
+# Logs and temporary files
+*.log
+*.tmp
+*.swp
+*~
+
+# Operating-system files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local GitHub modernization-tool state
+.github/modernize/

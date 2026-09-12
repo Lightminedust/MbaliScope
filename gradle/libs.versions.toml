@@ -1,0 +1,9 @@
+# Catalogue de versions centralisé.
+# https://docs.gradle.org/current/userguide/version_catalogs.html
+#
+# JavaFX n'y figure pas volontairement : sa version est pilotée par le
+# bloc javafx{} de app/build.gradle.kts (plugin org.openjfx.javafxplugin).
+
+[versions]
+
+[libraries]
