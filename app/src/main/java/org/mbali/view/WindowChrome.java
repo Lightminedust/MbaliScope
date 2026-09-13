@@ -23,9 +23,9 @@ import javafx.stage.Stage;
  */
 public final class WindowChrome {
 
-    private static final Color GOLD = Color.web("#e4cda2");
-    private static final Color GOLD_DIM = Color.web("#8d7650");
-    private static final Color DANGER = Color.web("#e8a09a");
+    private static final Color BRIGHT = Color.web("#f2f2f5");
+    private static final Color DIM = Color.web("#8c8c98");
+    private static final Color DANGER = Color.web("#ff2d55");
 
     public static final double BAR_HEIGHT = 34;
     private static final double BUTTON = 34;
@@ -132,7 +132,7 @@ public final class WindowChrome {
         GraphicsContext gc = canvas.getGraphicsContext2D();
         gc.clearRect(0, 0, BUTTON, BUTTON);
 
-        Color ink = hover ? (glyph == Glyph.CLOSE ? DANGER : GOLD) : GOLD_DIM;
+        Color ink = hover ? (glyph == Glyph.CLOSE ? DANGER : BRIGHT) : DIM;
         if (hover) {
             // Un cerclage discret plutôt qu'un aplat : la carte n'a aucun aplat.
             gc.setStroke(ink.deriveColor(0, 1, 1, .35));

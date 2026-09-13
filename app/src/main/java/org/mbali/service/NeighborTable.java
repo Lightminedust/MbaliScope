@@ -1,5 +1,8 @@
 package org.mbali.service;
 
+import java.io.IOException;
+import java.net.InetAddress;
+import java.net.NetworkInterface;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
@@ -13,6 +16,40 @@ final class NeighborTable {
     private static final Pattern IPV6 = Pattern.compile("(?i)(?:[0-9a-f]{0,4}:){2,}[0-9a-f]{0,4}(?:%[\\w.-]+)?");
 
     private NeighborTable() {
+    }
+
+    /**
+     * Réveille le lien avant de lire la table.
+     *
+     * Un appareil en veille laisse vieillir son entrée. Mesuré sur un vrai réseau : le
+     * téléphone restait « Stale », sans adresse IPv6 connue, jusqu'à un ping vers
+     * ff02::1, l'adresse « tous les nœuds du lien ». Tout hôte IPv6 éveillé est tenu d'y
+     * répondre, ce qui rafraîchit la table en un seul envoi — il est alors passé
+     * « Reachable » et a gagné son adresse de lien local.
+     *
+     * Sous Windows la commande se termine en erreur, faute de pouvoir recueillir la
+     * réponse d'un groupe : seul l'effet sur la table compte, le résultat est ignoré.
+     */
+    static void wakeLink(String localAddress) {
+        try {
+            NetworkInterface netInterface =
+                    NetworkInterface.getByInetAddress(InetAddress.getByName(localAddress));
+            if (netInterface == null) {
+                return;
+            }
+            String os = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
+            if (os.contains("win")) {
+                ShellCommand.output("ping", "-6", "-n", "2", "-w", "800",
+                        "ff02::1%" + netInterface.getIndex());
+            } else if (os.contains("mac")) {
+                ShellCommand.output("ping6", "-c", "2", "ff02::1%" + netInterface.getName());
+            } else {
+                ShellCommand.output("ping", "-6", "-c", "2", "-W", "1",
+                        "ff02::1%" + netInterface.getName());
+            }
+        } catch (IOException | RuntimeException unavailable) {
+            // Sans réveil, la lecture passive reste valable : on la fait quand même.
+        }
     }
 
     static Map<String, String> read() {

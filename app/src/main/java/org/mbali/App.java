@@ -1,9 +1,11 @@
 package org.mbali;
 
 import java.io.IOException;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.List;
+import java.util.OptionalLong;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
@@ -13,6 +15,8 @@ import org.mbali.model.Device;
 import org.mbali.model.DeviceType;
 import org.mbali.model.NetworkLink;
 import org.mbali.model.NetworkTopology;
+import org.mbali.model.Presence;
+import org.mbali.model.ProcessSnapshot;
 import org.mbali.service.LivePulse;
 import org.mbali.service.NetworkScanner;
 import org.mbali.service.NetworkScanner.Subnet;
@@ -25,6 +29,9 @@ import org.mbali.view.ConstellationLayout.SatelliteKind;
 import org.mbali.view.ConstellationRenderer;
 import org.mbali.view.ConstellationRenderer.Filter;
 import org.mbali.view.ConstellationRenderer.Loading;
+import org.mbali.view.SpacetimeLayout;
+import org.mbali.view.SpacetimeRenderer;
+import org.mbali.view.UiLanguage;
 import org.mbali.view.WindowChrome;
 
 import javafx.animation.AnimationTimer;
@@ -49,21 +56,63 @@ public class App extends Application {
     private static final double HEIGHT = 780;
     private static final double FIT_MARGIN = 70;
 
-    private static final String CONTROL_STYLE =
-            "-fx-background-color: rgba(8,11,23,.88); -fx-border-color: #8d7650; "
-            + "-fx-text-fill: #e4cda2; -fx-font-family: 'Consolas'; -fx-font-size: 10px; "
-            + "-fx-padding: 7 12 7 12; -fx-cursor: hand;";
-    private static final String ACTIVE_STYLE =
-            "-fx-background-color: rgba(228,205,162,.16); -fx-border-color: #e4cda2; "
-            + "-fx-text-fill: #f0e6d2; -fx-font-family: 'Consolas'; -fx-font-size: 10px; "
-            + "-fx-padding: 7 12 7 12; -fx-cursor: hand;";
-    private static final String FIELD_STYLE =
-            "-fx-background-color: rgba(8,11,23,.88); -fx-border-color: #8d7650; "
-            + "-fx-text-fill: #f0e6d2; -fx-prompt-text-fill: #6d6250; "
-            + "-fx-font-family: 'Consolas'; -fx-font-size: 10px; -fx-padding: 6 10 6 10;";
+    // Les deux vues partagent le style de planche : noir, filets gris, capitales, accent rouge
+    private static final String PLATE_CONTROL_STYLE =
+            "-fx-background-color: rgba(6,6,10,.85); -fx-border-color: #3a3a44; -fx-background-radius: 0; "
+            + "-fx-text-fill: #c8c8d2; -fx-font-family: 'Segoe UI'; -fx-font-weight: bold; -fx-font-size: 9.5px; "
+            + "-fx-padding: 7 13 7 13; -fx-cursor: hand;";
+    private static final String PLATE_ACTIVE_STYLE =
+            "-fx-background-color: #ff2d55; -fx-border-color: #ff2d55; -fx-background-radius: 0; "
+            + "-fx-text-fill: #06060a; -fx-font-family: 'Segoe UI'; -fx-font-weight: bold; -fx-font-size: 9.5px; "
+            + "-fx-padding: 7 13 7 13; -fx-cursor: hand;";
+    private static final String PLATE_FIELD_STYLE =
+            "-fx-background-color: rgba(6,6,10,.85); -fx-border-color: transparent transparent #5a5a66 transparent; "
+            + "-fx-background-radius: 0; -fx-text-fill: #f2f2f5; -fx-prompt-text-fill: #6a6a76; "
+            + "-fx-font-family: 'Segoe UI'; -fx-font-size: 10px; -fx-padding: 6 2 6 2;";
+    /** Un interrupteur allumé : filet et texte clairs, sans l'aplat rouge réservé à la vue choisie. */
+    private static final String PLATE_ON_STYLE =
+            "-fx-background-color: rgba(6,6,10,.85); -fx-border-color: #c8c8d2; -fx-background-radius: 0; "
+            + "-fx-text-fill: #f2f2f5; -fx-font-family: 'Segoe UI'; -fx-font-weight: bold; -fx-font-size: 9.5px; "
+            + "-fx-padding: 7 13 7 13; -fx-cursor: hand;";
+    private static final String PLATE_OFF_STYLE =
+            "-fx-background-color: rgba(6,6,10,.85); -fx-border-color: #2a2a32; -fx-background-radius: 0; "
+            + "-fx-text-fill: #5a5a66; -fx-font-family: 'Segoe UI'; -fx-font-weight: bold; -fx-font-size: 9.5px; "
+            + "-fx-padding: 7 13 7 13; -fx-cursor: hand;";
 
     private final Camera camera = new Camera();
     private final ConstellationRenderer renderer = new ConstellationRenderer();
+
+    /** Les deux systèmes que la fenêtre sait montrer. */
+    private enum View { NETWORK, PROCESSES }
+
+    /** Écart entre deux relevés de processus : la lecture elle-même consomme du CPU. */
+    private static final long PROCESS_REFRESH_MS = 3_000;
+
+    private View view = View.NETWORK;
+    // Chaque vue garde sa caméra : revenir au réseau retrouve le cadrage laissé.
+    private final Camera processCamera = new Camera();
+    private final SpacetimeRenderer spacetime = new SpacetimeRenderer();
+    // Écrit et lu sur le thread graphique ; le relevé est mis en forme ailleurs puis publié ici.
+    private SpacetimeLayout.Field processField;
+    private boolean processCameraMoved;
+    private AtomicBoolean processWatchStopped = new AtomicBoolean(true);
+    private Thread processWatch;
+
+    private Button networkButton;
+    private Button processesButton;
+    private Button languageButton;
+    private Button principalViewButton;
+    private Button wholeViewButton;
+    private Button pauseViewButton;
+    private final List<ToggleButton> familyButtons = new ArrayList<>();
+    private HBox scanRow;
+    private HBox familyRow;
+    private HBox processRow;
+    private List<Button> processButtons = List.of();
+    private boolean processOverview;
+    private boolean canvasDragged;
+    private String processReadError;
+    private TextField search;
 
     private Canvas canvas;
     private Button refreshButton;
@@ -80,12 +129,15 @@ public class App extends Application {
     // du scan repassent par Platform.runLater, donc aucune synchronisation n'est nécessaire.
     private Device localHost;
     private final List<Device> discovered = new ArrayList<>();
+    private final List<Device> bluetooth = new ArrayList<>();
     private Constellation constellation;
     private String statusText = "Analyse de la machine locale...";
     private Loading loading = Loading.indeterminate(
             "Analyse du système", "Inventaire de la machine locale");
 
     private WindowChrome chrome;
+    private Stage primaryStage;
+    private UiLanguage language = UiLanguage.FRENCH;
     private final LivePulse pulse = new LivePulse();
     private final List<Double> latencies = new ArrayList<>();
     private static final int LATENCY_HISTORY = 40;
@@ -104,6 +156,7 @@ public class App extends Application {
 
     @Override
     public void start(Stage primaryStage) {
+        this.primaryStage = primaryStage;
         Pane root = new Pane();
         canvas = new Canvas(WIDTH, HEIGHT);
         canvas.widthProperty().bind(root.widthProperty());
@@ -128,20 +181,28 @@ public class App extends Application {
                 // La caméra glisse vers sa cible sur le temps réellement écoulé. Le
                 // plafond évite un saut après une pause du système, où l'écart entre
                 // deux images peut valoir plusieurs secondes.
-                camera.update(Math.min((now - previousNanos) / 1_000_000_000.0, 0.1));
+                double elapsed = Math.min((now - previousNanos) / 1_000_000_000.0, 0.1);
                 previousNanos = now;
-                renderer.draw(gc, constellation, camera,
-                        canvas.getWidth(), canvas.getHeight(), seconds,
-                        mouseX, mouseY, mouseInside, statusText, selectedId,
-                        new Filter(query, visibleKinds), loading);
+                camera.update(elapsed);
+                processCamera.update(elapsed);
+                if (view == View.PROCESSES) {
+                    spacetime.draw(gc, processField, processCamera,
+                            canvas.getWidth(), canvas.getHeight(), seconds, elapsed,
+                            mouseX, mouseY, mouseInside, selectedId, query, processStatus());
+                } else {
+                    renderer.draw(gc, constellation, camera,
+                            canvas.getWidth(), canvas.getHeight(), seconds,
+                            mouseX, mouseY, mouseInside, language.scanText(statusText), selectedId,
+                            new Filter(query, visibleKinds), localized(loading));
+                }
             }
         };
         timer.start();
 
-        primaryStage.setTitle("Mbaliscope - Constellation Réseau");
+        primaryStage.setTitle("MbaliScope - Constellation Réseau");
         Scene scene = new Scene(root, WIDTH, HEIGHT);
         // Le fond de scène évite l'éclair blanc entre l'ouverture et la première image
-        scene.setFill(Color.web("#070914"));
+        scene.setFill(Color.web("#040407"));
         primaryStage.setScene(scene);
 
         // La même marque est fournie à toutes les tailles utiles afin que la fenêtre,
@@ -150,12 +211,18 @@ public class App extends Application {
         AppIcon.installDesktopIcon();
 
         installMonitor(root);
+        updateLanguage();
         installChrome(root);
         chrome.fillScreen();
         primaryStage.show();
         primaryStage.setOnCloseRequest(event -> shutdown());
         refreshScan();
         startLivePulse();
+        // Option de lancement : ouvrir directement sur l'espace-temps des processus,
+        // par exemple pour une démonstration (gradlew run --args="--processes")
+        if (getParameters().getRaw().contains("--processes")) {
+            setView(View.PROCESSES);
+        }
     }
 
     /** La barre de fenêtre : zone de déplacement à gauche, commandes à droite. */
@@ -195,72 +262,296 @@ public class App extends Application {
 
     private void shutdown() {
         pulse.stop();
+        stopProcessWatch();
         cancelScan(false);
+    }
+
+    /** Bascule entre la carte du réseau et l'espace-temps des processus. */
+    private void setView(View next) {
+        if (view == next) {
+            return;
+        }
+        view = next;
+        selectedId = null;
+        boolean processes = next == View.PROCESSES;
+        networkButton.setStyle(processes ? PLATE_CONTROL_STYLE : PLATE_ACTIVE_STYLE);
+        processesButton.setStyle(processes ? PLATE_ACTIVE_STYLE : PLATE_CONTROL_STYLE);
+        // Le balayage réseau et les familles de satellites n'ont pas de sens pour les processus
+        scanRow.setVisible(!processes);
+        scanRow.setManaged(!processes);
+        familyRow.setVisible(!processes);
+        familyRow.setManaged(!processes);
+        processRow.setVisible(processes);
+        processRow.setManaged(processes);
+        updateSearchPrompt();
+        // On ne lit les processus que lorsqu'on les regarde : la lecture a elle-même un coût
+        if (processes) {
+            startProcessWatch();
+        } else {
+            stopProcessWatch();
+        }
+    }
+
+    /**
+     * Relève les processus à intervalle régulier, sur un thread virtuel. La mise en forme
+     * est faite sur ce thread aussi, puis publiée d'un bloc au thread graphique : l'animation
+     * ne s'arrête jamais le temps d'un relevé.
+     */
+    private void startProcessWatch() {
+        stopProcessWatch();
+        AtomicBoolean stopped = new AtomicBoolean();
+        processWatchStopped = stopped;
+        OptionalLong ownPid = OptionalLong.of(ProcessHandle.current().pid());
+        int cores = Runtime.getRuntime().availableProcessors();
+        SpacetimeLayout.Field seed = processField;
+        processWatch = Thread.ofVirtual().name("process-watch").start(() -> {
+            SpacetimeLayout.Field previous = seed;
+            while (!stopped.get()) {
+                List<ProcessSnapshot> processes = SystemScanner.scanProcesses();
+                if (stopped.get()) {
+                    return;
+                }
+                if (processes.isEmpty()) {
+                    Platform.runLater(() -> {
+                        if (!stopped.get()) processReadError = "Lecture indisponible · dernier relevé conservé";
+                    });
+                } else {
+                    SpacetimeLayout.Field field = SpacetimeLayout.compute(processes,
+                            SystemScanner.totalMemoryBytes(), cores, Instant.now(), ownPid, previous);
+                    previous = field;
+                    Platform.runLater(() -> {
+                        if (!stopped.get()) {
+                            processReadError = null;
+                            publishProcesses(field);
+                        }
+                    });
+                }
+                try {
+                    Thread.sleep(PROCESS_REFRESH_MS);
+                } catch (InterruptedException interrupted) {
+                    return;
+                }
+            }
+        });
+    }
+
+    private void stopProcessWatch() {
+        processWatchStopped.set(true);
+        if (processWatch != null) {
+            processWatch.interrupt();
+            processWatch = null;
+        }
+    }
+
+    private void publishProcesses(SpacetimeLayout.Field field) {
+        boolean first = processField == null;
+        processField = field;
+        if (first && !processCameraMoved) {
+            frameProcesses();
+            processCamera.settle();
+        }
+    }
+
+    private void frameProcesses() {
+        if (processField == null) {
+            return;
+        }
+        double width = canvas.getWidth() > 0 ? canvas.getWidth() : WIDTH;
+        double height = canvas.getHeight() > 0 ? canvas.getHeight() : HEIGHT;
+        spacetime.frame(processCamera, processField, width, height, processOverview);
+    }
+
+    private String processStatus() {
+        if (processReadError != null) return language.text(processReadError, "Reading unavailable · keeping last sample");
+        if (spacetime.paused()) return language.text(
+                "Vue figée · les relevés continuent en arrière-plan",
+                "Frozen view · sampling continues in the background");
+        if (processField == null) {
+            return language.text("Lecture des processus…", "Reading processes…");
+        }
+        if (processField.masses().isEmpty()) {
+            return language.text("Aucun processus lu : la lecture a échoué", "No processes read: sampling failed");
+        }
+        return language.text(
+                processField.processCount() + " processus     " + processField.masses().size()
+                        + " familles     actualisation ≈ " + PROCESS_REFRESH_MS / 1000 + " s",
+                processField.processCount() + " processes     " + processField.masses().size()
+                        + " families     refresh ≈ " + PROCESS_REFRESH_MS / 1000 + " s");
+    }
+
+    private void markCameraMoved() {
+        if (view == View.PROCESSES) {
+            processCameraMoved = true;
+        } else {
+            cameraMoved = true;
+        }
     }
 
     /** Le moniteur : balayage, recherche, et un interrupteur par famille. */
     private void installMonitor(Pane root) {
         refreshButton = new Button("↻  ACTUALISER");
         cancelButton = new Button("■  ARRÊTER");
-        refreshButton.setStyle(CONTROL_STYLE);
-        cancelButton.setStyle(CONTROL_STYLE);
+        refreshButton.setStyle(PLATE_CONTROL_STYLE);
+        cancelButton.setStyle(PLATE_CONTROL_STYLE);
         refreshButton.setOnAction(event -> refreshScan());
         cancelButton.setOnAction(event -> cancelScan(true));
-        HBox scanRow = new HBox(8, refreshButton, cancelButton);
+        scanRow = new HBox(8, refreshButton, cancelButton);
 
-        TextField search = new TextField();
+        // Les deux systèmes : la carte du réseau, et l'espace-temps des processus
+        networkButton = new Button("RÉSEAU");
+        processesButton = new Button("PROCESSUS");
+        networkButton.setStyle(PLATE_ACTIVE_STYLE);
+        processesButton.setStyle(PLATE_CONTROL_STYLE);
+        networkButton.setOnAction(event -> setView(View.NETWORK));
+        processesButton.setOnAction(event -> setView(View.PROCESSES));
+        languageButton = new Button();
+        languageButton.setStyle(PLATE_CONTROL_STYLE);
+        languageButton.setOnAction(event -> {
+            language = language == UiLanguage.FRENCH ? UiLanguage.ENGLISH : UiLanguage.FRENCH;
+            updateLanguage();
+        });
+        HBox viewRow = new HBox(6, networkButton, processesButton, languageButton);
+
+        search = new TextField();
         search.setPromptText("RECHERCHER  ( port, processus, matériel… )");
-        search.setStyle(FIELD_STYLE);
+        search.setStyle(PLATE_FIELD_STYLE);
         search.setPrefWidth(320);
         // Recherche à la frappe : pas de bouton à presser
         search.textProperty().addListener((observable, before, after) -> query = after);
-        search.setOnAction(event -> query = search.getText());
+        search.setOnAction(event -> {
+            query = search.getText();
+            if (view == View.PROCESSES && spacetime.focus(processCamera, processField, query,
+                    canvas.getWidth(), canvas.getHeight())) processCameraMoved = true;
+        });
 
-        HBox familyRow = new HBox(6,
-                familyToggle("ADAPTATEURS", SatelliteKind.ADAPTER),
-                familyToggle("PÉRIPHÉRIQUES", SatelliteKind.PERIPHERAL),
-                familyToggle("PORTS", SatelliteKind.PORT),
-                familyToggle("SERVICES", SatelliteKind.SERVICE));
+        familyButtons.clear();
+        familyRow = new HBox(6,
+                familyToggle(SatelliteKind.ADAPTER),
+                familyToggle(SatelliteKind.PERIPHERAL),
+                familyToggle(SatelliteKind.PORT),
+                familyToggle(SatelliteKind.SERVICE));
 
-        VBox monitor = new VBox(8, scanRow, search, familyRow);
+        principalViewButton = new Button("PRINCIPAUX");
+        wholeViewButton = new Button("VUE D’ENSEMBLE");
+        pauseViewButton = new Button("Ⅱ  PAUSE");
+        processButtons = List.of(principalViewButton, wholeViewButton, pauseViewButton);
+        for (Button button : processButtons) button.setStyle(PLATE_CONTROL_STYLE);
+        principalViewButton.setOnAction(event -> {
+            processOverview = false;
+            processCameraMoved = false;
+            frameProcesses();
+        });
+        wholeViewButton.setOnAction(event -> {
+            processOverview = true;
+            processCameraMoved = false;
+            frameProcesses();
+        });
+        pauseViewButton.setOnAction(event -> {
+            spacetime.setPaused(!spacetime.paused());
+            updateLanguage();
+        });
+        processRow = new HBox(6, principalViewButton, wholeViewButton, pauseViewButton);
+        processRow.setVisible(false);
+        processRow.setManaged(false);
+        VBox monitor = new VBox(8, viewRow, scanRow, search, familyRow, processRow);
         monitor.setLayoutX(24);
         // Sous la barre de fenêtre, qui occupe désormais le haut
         monitor.setLayoutY(WindowChrome.BAR_HEIGHT + 14);
         root.getChildren().add(monitor);
     }
 
-    private ToggleButton familyToggle(String label, SatelliteKind kind) {
-        ToggleButton toggle = new ToggleButton(label);
+    private ToggleButton familyToggle(SatelliteKind kind) {
+        ToggleButton toggle = new ToggleButton();
+        toggle.setUserData(kind);
+        familyButtons.add(toggle);
         toggle.setSelected(true);
-        toggle.setStyle(ACTIVE_STYLE);
+        toggle.setStyle(PLATE_ON_STYLE);
         toggle.setOnAction(event -> {
             if (toggle.isSelected()) {
                 visibleKinds.add(kind);
-                toggle.setStyle(ACTIVE_STYLE);
+                toggle.setStyle(PLATE_ON_STYLE);
             } else {
                 visibleKinds.remove(kind);
-                toggle.setStyle(CONTROL_STYLE);
+                toggle.setStyle(PLATE_OFF_STYLE);
             }
         });
         return toggle;
     }
 
+    private void updateLanguage() {
+        renderer.setLanguage(language);
+        spacetime.setLanguage(language);
+        if (primaryStage != null) {
+            primaryStage.setTitle(language.text(
+                    "MbaliScope - Constellation Réseau",
+                    "MbaliScope - Network Constellation"));
+        }
+        if (languageButton == null) {
+            return;
+        }
+        languageButton.setText(language == UiLanguage.FRENCH ? "ENGLISH" : "FRANÇAIS");
+        networkButton.setText(language.text("RÉSEAU", "NETWORK"));
+        processesButton.setText(language.text("PROCESSUS", "PROCESSES"));
+        refreshButton.setText(language.text("↻  ACTUALISER", "↻  REFRESH"));
+        cancelButton.setText(language.text("■  ARRÊTER", "■  STOP"));
+        updateSearchPrompt();
+        for (ToggleButton button : familyButtons) {
+            SatelliteKind kind = (SatelliteKind) button.getUserData();
+            button.setText(switch (kind) {
+                case ADAPTER -> language.text("CARTES RÉSEAU", "NETWORK ADAPTERS");
+                case PERIPHERAL -> language.text("PÉRIPHÉRIQUES", "PERIPHERALS");
+                case PORT -> "PORTS";
+                case SERVICE -> "SERVICES";
+            });
+        }
+        principalViewButton.setText(language.text("PRINCIPAUX", "MAIN"));
+        wholeViewButton.setText(language.text("VUE D’ENSEMBLE", "OVERVIEW"));
+        pauseViewButton.setText(spacetime.paused()
+                ? language.text("▷  REPRENDRE", "▷  RESUME")
+                : "Ⅱ  PAUSE");
+    }
+
+    private void updateSearchPrompt() {
+        if (search == null) return;
+        search.setPromptText(view == View.PROCESSES
+                ? language.text("RECHERCHER UN PROCESSUS", "SEARCH FOR A PROCESS")
+                : language.text("RECHERCHER  ( port, processus, matériel… )",
+                        "SEARCH  ( port, process, hardware… )"));
+    }
+
+    private Loading localized(Loading current) {
+        if (current == null) return null;
+        return new Loading(language.scanText(current.title()), language.scanText(current.detail()), current.progress());
+    }
+
     private void installControls() {
         canvas.setOnScroll(event -> {
-            camera.zoomAt(event.getX(), event.getY(), event.getDeltaY() > 0 ? 1.18 : 1 / 1.18);
-            cameraMoved = true;
+            double factor = event.getDeltaY() > 0 ? 1.18 : 1 / 1.18;
+            if (view == View.PROCESSES) {
+                spacetime.zoomAt(processCamera, event.getX(), event.getY(), factor, canvas.getWidth(), canvas.getHeight());
+            } else {
+                camera.zoomAt(event.getX(), event.getY(), factor);
+            }
+            markCameraMoved();
         });
         canvas.setOnMousePressed(event -> {
             dragX = event.getX();
             dragY = event.getY();
+            canvasDragged = false;
         });
         canvas.setOnMouseDragged(event -> {
-            camera.pan(event.getX() - dragX, event.getY() - dragY);
+            if (view == View.PROCESSES) {
+                if (event.isSecondaryButtonDown()) spacetime.tilt(event.getY() - dragY);
+                else spacetime.pan(processCamera, event.getX() - dragX, event.getY() - dragY);
+            } else {
+                camera.pan(event.getX() - dragX, event.getY() - dragY);
+            }
+            canvasDragged = true;
             dragX = event.getX();
             dragY = event.getY();
             mouseX = event.getX();
             mouseY = event.getY();
-            cameraMoved = true;
+            markCameraMoved();
         });
         canvas.setOnMouseMoved(event -> {
             mouseX = event.getX();
@@ -271,6 +562,23 @@ public class App extends Application {
 
         // Double-clic : retour au cadrage d'ensemble, machine locale au centre
         canvas.setOnMouseClicked(event -> {
+            if (canvasDragged || event.getButton() != javafx.scene.input.MouseButton.PRIMARY) return;
+            if (view == View.PROCESSES) {
+                String hit = spacetime.hitTest(event.getX(), event.getY());
+                if (event.getClickCount() == 2) {
+                    if (spacetime.focus(processCamera, processField, hit, canvas.getWidth(), canvas.getHeight())) {
+                        selectedId = hit;
+                        processCameraMoved = true;
+                    } else {
+                        selectedId = null;
+                        processCameraMoved = false;
+                        frameProcesses();
+                    }
+                } else {
+                    selectedId = hit;
+                }
+                return;
+            }
             if (event.getClickCount() == 2) {
                 selectedId = null;
                 cameraMoved = false;
@@ -280,8 +588,16 @@ public class App extends Application {
             }
         });
 
-        canvas.widthProperty().addListener((observable, before, after) -> frameIfUntouched());
-        canvas.heightProperty().addListener((observable, before, after) -> frameIfUntouched());
+        canvas.widthProperty().addListener((observable, before, after) -> reframeUntouchedViews());
+        canvas.heightProperty().addListener((observable, before, after) -> reframeUntouchedViews());
+    }
+
+    /** Un redimensionnement recadre chaque vue que l'utilisateur n'a pas déplacée. */
+    private void reframeUntouchedViews() {
+        frameIfUntouched();
+        if (!processCameraMoved) {
+            frameProcesses();
+        }
     }
 
     private void refreshScan() {
@@ -301,9 +617,22 @@ public class App extends Application {
                 Platform.runLater(() -> {
                     localHost = scanned;
                     discovered.clear();
+                    bluetooth.clear();
                     rebuild();
                     scanNetwork(token);
                 });
+                // Le Bluetooth ne dépend pas du réseau : il est lu pendant le balayage au
+                // lieu de retarder de plusieurs secondes l'apparition de la carte.
+                List<Device> paired = SystemScanner.scanBluetooth();
+                if (!token.get()) {
+                    Platform.runLater(() -> {
+                        if (!token.get()) {
+                            bluetooth.clear();
+                            bluetooth.addAll(paired);
+                            rebuild();
+                        }
+                    });
+                }
             } catch (RuntimeException e) {
                 Platform.runLater(() -> finishScan(token, "Analyse locale impossible : " + e.getMessage()));
             }
@@ -414,7 +743,10 @@ public class App extends Application {
         int hardware = localHost == null ? 0 : localHost.getPeripherals().size();
         // On compte les machines physiques, pas les adresses : sinon le total
         // contredit la carte, qui fusionne les adresses d'un même matériel.
-        return machines().size() + " appareil(s) connecté(s)     "
+        long pairedActive = bluetooth.stream()
+                .filter(device -> device.getPresence() == Presence.ACTIVE).count();
+        return machines().size() + " appareil(s) réseau     "
+                + pairedActive + "/" + bluetooth.size() + " bluetooth actif(s)     "
                 + ports + " port(s) en écoute     " + hardware + " périphérique(s)";
     }
 
@@ -458,6 +790,12 @@ public class App extends Application {
             }
             rebuilt.addDevice(device);
             rebuilt.addLink(new NetworkLink(hub, device, relation(device)));
+        }
+        // Les appareils Bluetooth sont appairés à cette machine : ils gravitent autour
+        // d'elle, comme les clients du réseau gravitent autour de la box.
+        for (Device paired : bluetooth) {
+            rebuilt.addDevice(paired);
+            rebuilt.addLink(new NetworkLink(localHost, paired, "Bluetooth"));
         }
         constellation = ConstellationLayout.compute(rebuilt);
         // Le battement lit ces deux valeurs depuis son propre thread.

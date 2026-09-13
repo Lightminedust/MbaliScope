@@ -13,6 +13,10 @@ public class Device {
     private final String ipAddress;
     private final DeviceType type;
     private String macAddress = UNKNOWN_MAC;
+    private Presence presence = Presence.ACTIVE;
+    // Ce qui justifie ce que la carte dit de l'appareil : d'où vient son nom, pourquoi il
+    // manque, ou dans quel état se trouve sa liaison.
+    private String evidence = "";
     private final List<PortEndpoint> endpoints = new ArrayList<>();
     private final List<NetworkAdapter> adapters = new ArrayList<>();
     private final List<Peripheral> peripherals = new ArrayList<>();
@@ -46,6 +50,14 @@ public class Device {
     public List<Peripheral> getPeripherals() { return Collections.unmodifiableList(peripherals); }
 
     public void setMacAddress(String macAddress) { this.macAddress = macAddress; }
+
+    public Presence getPresence() { return presence; }
+    public void setPresence(Presence presence) {
+        this.presence = presence == null ? Presence.ACTIVE : presence;
+    }
+
+    public String getEvidence() { return evidence; }
+    public void setEvidence(String evidence) { this.evidence = evidence == null ? "" : evidence; }
 
     // Deux objets Device désignent le même appareil s'ils ont le même id : c'est ce qui
     // empêche NetworkTopology de dupliquer un appareil recréé à chaque scan.

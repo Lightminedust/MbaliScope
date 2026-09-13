@@ -4,16 +4,22 @@ import java.io.IOException;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.lang.management.ManagementFactory;
 import java.net.NetworkInterface;
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.OptionalLong;
 
 import org.mbali.model.AdapterKind;
 import org.mbali.model.Device;
 import org.mbali.model.DeviceType;
 import org.mbali.model.NetworkAdapter;
 import org.mbali.model.Peripheral;
+import org.mbali.model.Presence;
+import org.mbali.model.ProcessSnapshot;
 import org.mbali.model.PortEndpoint;
 import org.mbali.model.PortType;
 
@@ -33,6 +39,51 @@ public final class SystemScanner {
             localDevice.addPeripheral(peripheral);
         }
         return localDevice;
+    }
+
+    /**
+     * Les appareils Bluetooth appairés à cette machine. Chacun devient un appareil à part
+     * entière, qui gravitera autour d'elle comme un client réseau autour de sa box.
+     */
+    public static List<Device> scanBluetooth() {
+        List<Device> devices = new ArrayList<>();
+        for (BluetoothInventory.BluetoothDevice paired : BluetoothInventory.read()) {
+            devices.add(toDevice(paired));
+        }
+        return devices;
+    }
+
+    /**
+     * Les processus de la machine à cet instant. Façade publique : la lecture elle-même
+     * reste interne au paquet service.
+     */
+    public static List<ProcessSnapshot> scanProcesses() {
+        return ProcessReader.read();
+    }
+
+    /** Mémoire physique totale, pour exprimer celle d'une application en pourcentage. */
+    public static OptionalLong totalMemoryBytes() {
+        try {
+            if (ManagementFactory.getOperatingSystemMXBean()
+                    instanceof com.sun.management.OperatingSystemMXBean system) {
+                long total = system.getTotalMemorySize();
+                return total > 0 ? OptionalLong.of(total) : OptionalLong.empty();
+            }
+        } catch (RuntimeException | LinkageError unavailable) {
+            // JVM qui n'expose pas cette mesure : les parts se rapporteront à la mémoire observée
+        }
+        return OptionalLong.empty();
+    }
+
+    static Device toDevice(BluetoothInventory.BluetoothDevice paired) {
+        // Pas d'adresse IP : la liaison est radio. Le champ porte donc la nature du lien.
+        Device device = new Device("bt:" + paired.address(), paired.name(), "Bluetooth",
+                DeviceType.BLUETOOTH);
+        device.setMacAddress(paired.formattedAddress());
+        // Seule une connexion affirmée rend l'appareil actif : un état inconnu n'en est pas une.
+        device.setPresence(Boolean.TRUE.equals(paired.connected()) ? Presence.ACTIVE : Presence.DORMANT);
+        device.setEvidence(paired.describe());
+        return device;
     }
 
     private static Device scanNetworkIdentity() {

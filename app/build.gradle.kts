@@ -37,6 +37,25 @@ application {
     applicationName = "MbaliScope"
 }
 
+// Captures du vrai Canvas pour vérifier cadrage, densité et détail sans lancer un scan réseau.
+tasks.register<JavaExec>("renderProcessPreview") {
+    group = "verification"
+    description = "Génère les aperçus de la carte des processus dans app/build/previews."
+    dependsOn("testClasses")
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass = "org.mbali.view.SpacetimePreview"
+    if (providers.gradleProperty("livePreview").isPresent) args("live")
+}
+
+// La même vérification pour la carte du réseau, sur un réseau inventé : aucun balayage.
+tasks.register<JavaExec>("renderNetworkPreview") {
+    group = "verification"
+    description = "Génère les aperçus de la carte du réseau dans app/build/previews."
+    dependsOn("testClasses")
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass = "org.mbali.view.ConstellationPreview"
+}
+
 // org.openjfx.javafxplugin 0.1.0 (dernière version publiée, 2023) lit le projet
 // pendant l'exécution de `run`, ce que le configuration cache de Gradle 9 refuse.
 // On exclut seulement cette tâche du cache plutôt que de le désactiver partout.
@@ -83,7 +102,7 @@ tasks.register<Exec>("packageWindows") {
         "--main-jar", packagedMainJar,
         "--main-class", "org.mbali.MbaliScopeLauncher",
         "--icon", windowsPackageIcon.absolutePath,
-        "--add-modules", "java.base,java.desktop,java.logging,java.management,java.naming,jdk.unsupported",
+        "--add-modules", "java.base,java.desktop,java.logging,java.management,java.naming,jdk.management,jdk.unsupported",
         "--java-options", "-Dfile.encoding=UTF-8"
     )
 }

@@ -125,7 +125,8 @@ final class HardwareInventory {
             }
             String deviceClass = fields.get(0);
             String name = fields.get(1);
-            if (name.isBlank() || !isInteresting(deviceClass, name)) {
+            if (name.isBlank() || isBluetoothPlumbingOrRemote(fields.get(2))
+                    || !isInteresting(deviceClass, name)) {
                 continue;
             }
             // Le même intitulé revient parfois une dizaine de fois
@@ -134,6 +135,19 @@ final class HardwareInventory {
             }
         }
         return peripherals;
+    }
+
+    /**
+     * Le Bluetooth a désormais sa propre lecture. On écarte ici deux choses : la plomberie
+     * de Windows (énumérateurs, RFCOMM, réseau personnel), qui n'est pas du matériel, et
+     * les appareils distants — des écouteurs appairés quatre mois plus tôt figuraient
+     * comme un périphérique branché sur la machine. La radio, elle, est bien du matériel
+     * local et reste.
+     */
+    static boolean isBluetoothPlumbingOrRemote(String instanceId) {
+        String id = instanceId.toUpperCase(Locale.ROOT);
+        return id.startsWith("BTH\\MS_") || id.startsWith("BTHENUM\\")
+                || id.startsWith("BTHLE\\") || id.startsWith("BTHLEDEVICE\\");
     }
 
     static boolean isInteresting(String deviceClass, String name) {

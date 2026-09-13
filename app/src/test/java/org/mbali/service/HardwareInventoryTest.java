@@ -64,6 +64,25 @@ class HardwareInventoryTest {
     }
 
     @Test
+    void keepsBluetoothPlumbingAndRemoteDevicesOutOfThePeripherals() {
+        // Releve reel : la plomberie de Windows et des ecouteurs appaires il y a quatre
+        // mois figuraient comme du materiel branche. Seule la radio est locale.
+        String csv = """
+                "Class","FriendlyName","InstanceId"
+                "Bluetooth","Microsoft Bluetooth Enumerator","BTH\\MS_BTHBRB\\6&18FE9849&0&1"
+                "Bluetooth","Bluetooth Device (RFCOMM Protocol TDI)","BTH\\MS_RFCOMM\\6&18FE9849&0&0"
+                "MEDIA","TWS","BTHENUM\\{0000110B-0000-1000-8000-00805F9B34FB}_LOCALMFG&005D\\7&CC49CA5&0&112233445566_C00000000"
+                "Bluetooth","TWS Avrcp Transport","BTHENUM\\{0000110C-0000-1000-8000-00805F9B34FB}_LOCALMFG&005D\\7&CC49CA5&0&112233445566_C00000000"
+                "Bluetooth","TWS","BTHENUM\\DEV_112233445566\\7&CC49CA5&0&BLUETOOTHDEVICE_112233445566"
+                "Bluetooth","Realtek Wireless Bluetooth Adapter","USB\\VID_0BDA&PID_B85C\\00E04C000001"
+                """;
+
+        List<String> names = HardwareInventory.parse(csv).stream().map(Peripheral::name).toList();
+
+        assertEquals(List.of("Realtek Wireless Bluetooth Adapter"), names);
+    }
+
+    @Test
     void classifiesByDeviceClass() {
         assertEquals(PeripheralKind.BLUETOOTH, HardwareInventory.classify("Bluetooth", "Realtek Adapter"));
         assertEquals(PeripheralKind.AUDIO, HardwareInventory.classify("MEDIA", "Wireless Controller"));

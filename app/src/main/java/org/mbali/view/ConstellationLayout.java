@@ -33,51 +33,49 @@ import org.mbali.model.PortEndpoint;
  * d'un trait vers lui : l'appartenance se lit dans le mouvement. Seuls deux systèmes
  * distincts sont reliés par un trait, car là l'orbite ne dit rien.
  *
- * Les gros appareils dansent sans jamais se rejoindre. Leur écartement n'est pas
- * réglé à l'œil : les racines sont posées sur un anneau dont le rayon est calculé
- * pour que la distance minimale reste supérieure à SYSTEM_GAP quelle que soit la
- * dérive, puisque chacune ne peut se rapprocher que de ROOT_DRIFT.
+ * Rien ne se marche dessus, et ce n'est pas réglé à l'œil : le cortège d'un appareil est
+ * rangé sur des anneaux dont l'écart et le nombre de places sont calculés à partir de
+ * l'encombrement de chaque objet, dérive comprise. Les appareils qui gravitent autour
+ * d'un autre sont rangés de la même manière, au-delà de son cortège, et l'écart entre
+ * deux systèmes grandit avec leur étendue réelle.
  *
  * Qui dépend de qui n'est pas décidé ici : c'est déduit des liens du modèle. La carte
  * ne peut donc pas affirmer une topologie que le modèle ne dit pas. Un appareil dont
  * on ignore le rattachement ne gravite autour de personne : il dérive dans le champ
  * extérieur, car le faire tourner autour d'un appareil serait affirmer sans preuve.
  *
- * Une barrière protège chaque noyau : quelle que soit la dérive, un objet ne peut pas
- * pénétrer à l'intérieur de son appareil.
- *
  * Le placement reste déterministe : un appareil retrouve sa place d'un scan au
- * suivant, car tout est tiré de son identifiant. Seule exception assumée : l'angle
- * des systèmes dépend de leur nombre, donc l'apparition d'un nouveau système
- * réarrange les systèmes entre eux — jamais un appareil vis-à-vis du sien.
+ * suivant, car tout est tiré de son identifiant et de l'ordre de ses voisins.
  */
 public final class ConstellationLayout {
 
     public enum SatelliteKind { ADAPTER, PERIPHERAL, PORT, SERVICE }
 
     /**
-     * Un objet du nuage. Sa position est sa position de repos plus une dérive à deux
-     * fréquences distinctes, ce qui décrit une courbe de Lissajous jamais bouclée.
+     * Un objet du cortège. Il tourne sur son anneau (orbit, angle, spin) et dérive
+     * légèrement autour de sa place, sur deux fréquences distinctes. homeX et homeY
+     * donnent sa place à l'instant zéro, relative à son centre.
      */
     public record Satellite(String id, String parentId, String label, String detail,
                             SatelliteKind kind, double homeX, double homeY,
                             double driftX, double driftY,
-                            double freqX, double freqY, double phaseX, double phaseY) {
+                            double freqX, double freqY, double phaseX, double phaseY,
+                            double orbit, double angle, double spin) {
     }
 
     /**
-     * Un appareil et son nuage.
+     * Un appareil et son cortège.
      *
      * parent est l'appareil autour duquel celui-ci gravite, ou null s'il est la racine
      * de son système. homeX et homeY sont un DÉCALAGE par rapport à ce parent, et non
      * une position absolue : c'est ce qui permet à un client de suivre sa box pendant
-     * qu'elle dérive, au lieu de rester planté où elle se trouvait au moment du scan.
+     * qu'elle dérive. rings donne le rayon de chaque anneau du cortège.
      */
     public record Star(Device device, Star parent, String parentId, double homeX, double homeY,
                        double drift, double freqX, double freqY, double phaseX, double phaseY,
                        double coreRadius, String primaryAdapterId,
                        List<Satellite> satellites, Map<String, Satellite> byId,
-                       double systemRadius) {
+                       double systemRadius, List<Double> rings) {
 
         /** Vrai si cet appareil ne gravite autour d'aucun autre. */
         public boolean isSystemRoot() {
@@ -102,27 +100,48 @@ public final class ConstellationLayout {
         }
     }
 
-    // Bandes de dispersion d'un nuage : un objet est tiré au hasard dans son anneau,
-    // pas réparti à intervalle régulier.
-    // Le cortège d'une machine tenait dans 12 000 unités alors que la carte en fait
-    // plus de 300 000 : tout se tassait en une pastille illisible. Les orbites sont
-    // désormais à l'échelle de l'espace qui les entoure, et surtout à l'échelle des
-    // corps eux-mêmes, qui ont maintenant une taille vraie et non une taille d'écran.
-    private static final double[] ADAPTER_BAND = { 12_000, 22_000 };
-    private static final double[] PERIPHERAL_BAND = { 28_000, 42_000 };
-    private static final double[] PORT_BAND = { 48_000, 68_000 };
-    private static final double[] SERVICE_BAND = { 2_500, 5_000 };
+    /** Rayons vrais des objets du cortège, en unités du monde. */
+    public static final double ADAPTER_RADIUS = 3_000;
+    public static final double PERIPHERAL_RADIUS = 2_600;
+    public static final double PORT_RADIUS = 2_200;
+    public static final double SERVICE_RADIUS = 1_100;
 
-    // Bandes des appareils qui gravitent autour d'un autre : vastes, et irrégulières.
-    private static final double[] GATEWAY_BAND = { 26_000, 40_000 };
-    private static final double[] LAN_BAND = { 52_000, 98_000 };
-    private static final double[] REMOTE_BAND = { 112_000, 152_000 };
+    /** Dérive maximale d'un objet du cortège autour de sa place, et d'un service. */
+    private static final double SATELLITE_DRIFT = 500;
+    private static final double SERVICE_DRIFT = 120;
+    /** Un service tourne autour de son port, sans jamais toucher sa sphère. */
+    private static final double SERVICE_ORBIT = PORT_RADIUS + SERVICE_RADIUS + SERVICE_DRIFT + 900;
+
+    /** Vide garanti entre deux objets voisins du cortège, au pire de leur dérive. */
+    private static final double SATELLITE_GAP = 1_800;
+    /** Dispersion radiale à l'intérieur d'un anneau : un anneau parfait se lit comme un dessin imposé. */
+    private static final double SATELLITE_JITTER = 900;
+    /** Le cortège commence à cette distance du centre, en plus gros noyau possible : l'appareil garde de l'espace. */
+    private static final double CORTEGE_START = 1.9;
 
     /**
-     * Écart minimal garanti entre deux systèmes, quelle que soit la dérive. Il doit
-     * dépasser la somme de leurs rayons : le système de la box atteint environ
-     * 105 000 (ses clients tournent jusqu'à 98 000), celui de cette machine environ
-     * 12 000. 260 000 laisse donc un vide franc entre les deux.
+     * Encombrement visible d'un appareil, en rayons de noyau : ses piques partent jusqu'à
+     * 1,55 fois son rayon.
+     */
+    private static final double DEVICE_ENVELOPE = 1.6;
+    private static final double DEVICE_GAP = 2_000;
+
+    /**
+     * Bandes des appareils qui gravitent autour d'un autre : { début minimal, dispersion
+     * radiale }. Le début réel recule au-delà du cortège du porteur quand celui-ci est vaste.
+     */
+    private static final double[] GATEWAY_BAND = { 30_000, 6_000 };
+    private static final double[] LAN_BAND = { 60_000, 10_000 };
+    private static final double[] REMOTE_BAND = { 112_000, 12_000 };
+    /** Les appareils Bluetooth gravitent autour de la machine qui les a appairés, au-delà de son cortège. */
+    private static final double[] BLUETOOTH_BAND = { 78_000, 4_000 };
+
+    /** Aplatissement vertical des orbites des appareils. */
+    private static final double SQUASH = 0.74;
+
+    /**
+     * Écart minimal garanti entre deux systèmes, quelle que soit la dérive. C'est un
+     * plancher : quand deux systèmes sont plus étendus, l'écart réel grandit avec eux.
      */
     public static final double SYSTEM_GAP = 260_000;
 
@@ -133,7 +152,6 @@ public final class ConstellationLayout {
      * Dispersion des systèmes, en fraction du secteur qui leur revient, et en fraction
      * du rayon de l'anneau. Sans elle, deux systèmes tombaient à 0 et π : un axe
      * horizontal parfait, que l'œil lit immédiatement comme une figure imposée.
-     * L'écartement garanti tient compte de cette dispersion au lieu de la subir.
      */
     private static final double ROOT_JITTER = 0.34;
     private static final double ROOT_RADIAL_SPREAD = 0.08;
@@ -177,16 +195,12 @@ public final class ConstellationLayout {
         // Un appareil n'est un système que si quelque chose dépend de lui — cette
         // machine comprise. On le relève AVANT de détacher l'observateur : sur un
         // réseau où la box ne porte que ce PC, détacher l'observateur effaçait la
-        // seule preuve que la box concentre quoi que ce soit. Elle était alors reléguée
-        // dans le champ extérieur et ce PC reprenait le centre — exactement le défaut
-        // que ce découpage en systèmes doit supprimer.
+        // seule preuve que la box concentre quoi que ce soit.
         Set<String> carriesOthers = new LinkedHashSet<>(uplinks.values());
 
         // La machine depuis laquelle on observe n'est le satellite de personne : elle
         // forme un système à part entière, à côté de la box. Le modèle conserve le
-        // lien réel entre les deux ; c'est le rendu qui le trace d'un système à
-        // l'autre, puisque l'orbite ne peut pas l'exprimer ici. Détacher est une
-        // décision de mise en page, elle n'efface aucun fait.
+        // lien réel entre les deux ; c'est le rendu qui le trace d'un système à l'autre.
         uplinks.remove(observer.getId());
 
         List<Device> roots = new ArrayList<>();
@@ -202,17 +216,40 @@ public final class ConstellationLayout {
             }
         }
 
+        // Le cortège de chaque appareil ne dépend que de lui : on le range d'abord, pour
+        // savoir jusqu'où il s'étend avant d'y poser les appareils qui gravitent autour.
+        Map<String, Cortege> corteges = new LinkedHashMap<>();
+        for (Device device : devices) {
+            corteges.put(device.getId(), cortege(device));
+        }
+
         Map<String, double[]> offsets = new LinkedHashMap<>();
-        double ring = rootRing(roots.size());
+        Map<String, List<Device>> carried = new LinkedHashMap<>();
+        for (Device device : devices) {
+            String carrier = uplinks.get(device.getId());
+            if (carrier != null) {
+                carried.computeIfAbsent(carrier, key -> new ArrayList<>()).add(device);
+            }
+        }
+        carried.forEach((carrier, members) -> placeMembers(corteges.get(carrier).reach(), members, offsets));
+
+        // L'écart entre systèmes suit leur étendue réelle, cortège et appareils compris
+        double[] extents = roots.stream()
+                .mapToDouble(root -> extent(root.getId(), corteges, carried, offsets))
+                .sorted().toArray();
+        double gap = SYSTEM_GAP;
+        if (extents.length >= 2) {
+            double needed = extents[extents.length - 1] + extents[extents.length - 2] + 30_000;
+            // Par paliers de 80 000 : une découverte qui agrandit à peine un système ne déplace pas la carte
+            gap = Math.max(gap, Math.ceil(needed / 80_000) * 80_000);
+        }
+        double ring = rootRing(roots.size(), gap);
         for (int index = 0; index < roots.size(); index++) {
             offsets.put(roots.get(index).getId(),
                     rootSlot(roots.get(index), index, roots.size(), ring));
         }
         for (Device lost : adrift) {
             offsets.put(lost.getId(), outerField(lost, ring));
-        }
-        for (Device device : devices) {
-            offsets.computeIfAbsent(device.getId(), key -> memberOffset(device));
         }
 
         // Un parent doit exister avant son enfant, puisque l'enfant le référence.
@@ -229,8 +266,7 @@ public final class ConstellationLayout {
                     continue;
                 }
                 double[] offset = offsets.get(device.getId());
-                built.put(device.getId(), star(device, built.get(parentId),
-                        offset[0], offset[1], offset[2]));
+                built.put(device.getId(), star(device, built.get(parentId), offset, corteges.get(device.getId())));
                 waiting.remove();
                 placedSomething = true;
             }
@@ -238,8 +274,8 @@ public final class ConstellationLayout {
         // Filet de sécurité : plutôt que de disparaître, un appareil dont le parent
         // reste introuvable est posé sans parent.
         for (Device stranded : pending) {
-            double[] offset = offsets.get(stranded.getId());
-            built.put(stranded.getId(), star(stranded, null, offset[0], offset[1], offset[2]));
+            double[] offset = offsets.getOrDefault(stranded.getId(), outerField(stranded, ring));
+            built.put(stranded.getId(), star(stranded, null, offset, corteges.get(stranded.getId())));
         }
 
         Map<Device, Star> stars = new LinkedHashMap<>();
@@ -252,10 +288,6 @@ public final class ConstellationLayout {
     /**
      * Qui dépend de qui, lu dans les liens du modèle : le porteur d'un appareil est la
      * source du lien qui le désigne.
-     *
-     * C'est la correction d'un défaut de fond : la carte plaçait cette machine à
-     * l'origine et tous les autres appareils autour d'elle, ce qui affirmait que tout
-     * passait par elle.
      */
     private static Map<String, String> uplinks(NetworkTopology topology, Map<String, Device> byId) {
         Map<String, String> uplinks = new LinkedHashMap<>();
@@ -299,29 +331,21 @@ public final class ConstellationLayout {
     /**
      * Rayon de l'anneau des systèmes, calculé et non choisi.
      *
-     * La corde entre deux emplacements voisins vaut 2·R·sin(π/n). On veut qu'elle
-     * dépasse SYSTEM_GAP + 2·ROOT_DRIFT, puisque deux systèmes voisins ne peuvent se
-     * rapprocher que de leur dérive. Le rayon s'en déduit, et s'agrandit donc tout
-     * seul quand des systèmes s'ajoutent.
+     * La corde entre deux emplacements voisins vaut 2·R·sin(π/n). Au pire de la
+     * dispersion angulaire (1 − ROOT_JITTER) et radiale (1 − SPREAD), elle doit dépasser
+     * l'écart voulu plus les deux dérives. Le rayon s'en déduit, et s'agrandit donc tout
+     * seul quand des systèmes s'ajoutent ou s'étendent.
      */
-    private static double rootRing(int systems) {
+    private static double rootRing(int systems, double gap) {
         if (systems <= 1) {
             return 0;
         }
-        // Deux systèmes voisins peuvent se rapprocher de trois façons : leur dérive,
-        // leur dispersion angulaire, et leur dispersion radiale. L'écart angulaire au
-        // pire vaut (2π/n)(1 − ROOT_JITTER), et le rayon au pire (1 − SPREAD)·R ;
-        // pour deux points de rayons différents, la distance est minorée par celle
-        // qu'ils auraient au plus petit des deux rayons.
         double worstAngle = (Math.PI / systems) * (1 - ROOT_JITTER);
         double worstRadius = 1 - ROOT_RADIAL_SPREAD;
-        return (SYSTEM_GAP + 2 * ROOT_DRIFT) / (2 * worstRadius * Math.sin(worstAngle));
+        return (gap + 2 * ROOT_DRIFT) / (2 * worstRadius * Math.sin(worstAngle));
     }
 
-    /**
-     * Emplacement d'un système sur l'anneau, dispersé dans le secteur qui lui revient.
-     * Un système seul se pose à l'origine, n'ayant personne dont s'écarter.
-     */
+    /** Emplacement d'un système sur l'anneau, dispersé dans le secteur qui lui revient. */
     private static double[] rootSlot(Device device, int index, int systems, double ring) {
         if (systems <= 1) {
             return new double[] { 0, 0, ROOT_DRIFT };
@@ -332,31 +356,67 @@ public final class ConstellationLayout {
                 + (random.nextDouble() - 0.5) * sector * ROOT_JITTER;
         double radius = ring * (1 - ROOT_RADIAL_SPREAD
                 + random.nextDouble() * ROOT_RADIAL_SPREAD * 2);
-        // L'anneau n'est pas aplati : la garantie d'écartement se lit alors directement
-        // sur la corde, sans correction à faire.
         return new double[] { Math.cos(angle) * radius, Math.sin(angle) * radius, ROOT_DRIFT };
     }
 
     /**
-     * Place un appareil dans le nuage de son porteur, en décalage relatif. Le tirage ne
-     * dépend que de son identifiant : découvrir un voisin de plus ne déplace donc aucun
-     * appareil déjà posé.
+     * Range les appareils portés par un même porteur sur des anneaux aplatis, au-delà de
+     * son cortège, par groupes : passerelles, réseau local, Bluetooth, serveurs distants.
+     *
+     * L'aplatissement de 0,74 rapproche deux points au plus d'un facteur 0,74 : les écarts
+     * sont donc calculés sur le cercle, divisés par 0,74, ce qui garantit l'écart réel sur
+     * l'ellipse. L'écart entre deux anneaux est celui du plus gros appareil possible de la
+     * bande, pour qu'un appareil qui grossit ne déplace pas les anneaux.
      */
-    private static double[] memberOffset(Device device) {
-        Random random = new Random(device.getId().hashCode() * 2_654_435_761L);
-        double[] band = bandFor(device.getType());
-        double radius = band[0] + random.nextDouble() * (band[1] - band[0]);
-        double angle = random.nextDouble() * Math.PI * 2;
-        return new double[] {
-                Math.cos(angle) * radius,
-                Math.sin(angle) * radius * 0.74,
-                2_400 + random.nextDouble() * 2_600 };
+    private static void placeMembers(double carrierReach, List<Device> members, Map<String, double[]> offsets) {
+        // Bord extérieur du groupe précédent, en rayon du cercle avant aplatissement
+        double outer = carrierReach / SQUASH;
+        for (double[] band : new double[][] { GATEWAY_BAND, LAN_BAND, BLUETOOTH_BAND, REMOTE_BAND }) {
+            List<Device> group = members.stream().filter(device -> bandFor(device.getType()) == band)
+                    .sorted(Comparator.comparing(Device::getId)).toList();
+            if (group.isEmpty()) {
+                continue;
+            }
+            double widest = maxCoreRadius(group.get(0).getType()) * DEVICE_ENVELOPE + MEMBER_DRIFT_MAX;
+            double jitter = band[1];
+            double centre = jitter / 2 + Math.max(band[0], outer + (widest + DEVICE_GAP) / SQUASH);
+            Orbits orbits = new Orbits(centre, (2 * widest + DEVICE_GAP) / SQUASH + jitter, jitter, SQUASH);
+            for (Device device : group) {
+                double footprint = coreRadiusFor(device) * DEVICE_ENVELOPE + memberDrift(device);
+                double[] slot = orbits.claim(device.getId().hashCode(), footprint, DEVICE_GAP);
+                offsets.put(device.getId(), new double[] {
+                        Math.cos(slot[1]) * slot[0], Math.sin(slot[1]) * slot[0] * SQUASH, memberDrift(device) });
+            }
+            outer = orbits.outermost() + jitter / 2 + widest / SQUASH;
+        }
+    }
+
+    /** Amplitude de la danse d'un appareil qui gravite autour d'un autre, tirée de son identifiant. */
+    private static double memberDrift(Device device) {
+        return 1_500 + Math.floorMod(device.getId().hashCode() * 2_654_435_761L, 1_000L) * 1.5;
+    }
+
+    private static final double MEMBER_DRIFT_MAX = 3_000;
+
+    /**
+     * Étendue d'un système depuis son centre : son cortège, et chaque appareil qui gravite
+     * autour de lui avec sa propre étendue.
+     */
+    private static double extent(String id, Map<String, Cortege> corteges, Map<String, List<Device>> carried,
+                                 Map<String, double[]> offsets) {
+        double reach = corteges.get(id).reach();
+        for (Device member : carried.getOrDefault(id, List.of())) {
+            double[] offset = offsets.get(member.getId());
+            reach = Math.max(reach, Math.hypot(offset[0], offset[1] / SQUASH) + offset[2]
+                    + Math.max(coreRadiusFor(member) * DEVICE_ENVELOPE,
+                            extent(member.getId(), corteges, carried, offsets)));
+        }
+        return reach;
     }
 
     /**
      * Un appareil dont on ignore le rattachement dérive au-delà des systèmes. Le faire
-     * tourner autour de l'un d'eux affirmerait une appartenance qu'on n'a pas établie,
-     * maintenant que l'orbite tient lieu de lien.
+     * tourner autour de l'un d'eux affirmerait une appartenance qu'on n'a pas établie.
      */
     private static double[] outerField(Device device, double ring) {
         Random random = new Random(device.getId().hashCode() * 7_919L + 31);
@@ -365,92 +425,224 @@ public final class ConstellationLayout {
         double angle = random.nextDouble() * Math.PI * 2;
         return new double[] {
                 Math.cos(angle) * radius,
-                Math.sin(angle) * radius * 0.74,
+                Math.sin(angle) * radius * SQUASH,
                 2_400 + random.nextDouble() * 2_600 };
     }
 
-    private static Star star(Device device, Star parent,
-                             double homeX, double homeY, double drift) {
+    /** Le cortège rangé d'un appareil : ses objets, ses anneaux, et jusqu'où il s'étend. */
+    private record Cortege(List<Satellite> satellites, List<Double> rings, String primaryAdapterId, double reach) {
+    }
+
+    /**
+     * Range le cortège sur des anneaux : cartes réseau au plus près, puis matériel, puis
+     * ports, chacun avec son service qui lui tourne autour.
+     *
+     * Le cortège commence à 1,9 fois le plus gros noyau possible de l'appareil, et non son
+     * noyau du moment : un port qui apparaît fait grossir l'appareil, mais ne doit pas
+     * repousser tous les anneaux.
+     */
+    private static Cortege cortege(Device device) {
         Random random = new Random(device.getId().hashCode() * 40_503L + 17);
+        long seed = device.getId().hashCode();
         List<Satellite> nodes = new ArrayList<>();
+        List<Double> rings = new ArrayList<>();
 
         String primaryAdapterId = null;
+        List<String[]> adapters = new ArrayList<>();
         for (NetworkAdapter adapter : device.getAdapters()) {
             String id = "adapter:" + adapter.name() + ':' + adapter.ipAddress();
-            nodes.add(node(random, id, null, adapter.kind().getLabel(),
-                    adapter.displayName() + " · " + adapter.ipAddress(),
-                    SatelliteKind.ADAPTER, ADAPTER_BAND));
-            // La carte qui porte l'adresse de l'appareil est celle par laquelle il
-            // atteint le réseau : c'est d'elle que part le trait vers l'autre système.
+            adapters.add(new String[] { id, adapter.kind().getLabel(), adapter.displayName() + " · " + adapter.ipAddress() });
+            // La carte qui porte l'adresse de l'appareil est celle par laquelle il atteint le réseau
             if (primaryAdapterId == null && adapter.ipAddress().equals(device.getIpAddress())) {
                 primaryAdapterId = id;
             }
         }
-        if (primaryAdapterId == null && !nodes.isEmpty()) {
-            primaryAdapterId = nodes.get(0).id();
+        if (primaryAdapterId == null && !adapters.isEmpty()) {
+            primaryAdapterId = adapters.get(0)[0];
         }
-
+        List<String[]> peripherals = new ArrayList<>();
         for (Peripheral peripheral : device.getPeripherals()) {
-            nodes.add(node(random, "peripheral:" + peripheral.hardwareId(), null,
-                    peripheral.name(), peripheral.kind().getLabel(),
-                    SatelliteKind.PERIPHERAL, PERIPHERAL_BAND));
+            peripherals.add(new String[] { "peripheral:" + peripheral.hardwareId(), peripheral.name(), peripheral.kind().getLabel() });
         }
 
-        for (PortEndpoint port : device.getEndpoints()) {
-            String portId = "port:" + port.getPortNumber() + ':' + port.getLocalAddress()
-                    + ':' + port.getOwner();
-            String detail = port.getOwner()
-                    + (port.getLocalAddress().isBlank() ? "" : " · " + port.getLocalAddress());
-            nodes.add(node(random, portId, null, "Port " + port.getPortNumber(), detail,
-                    SatelliteKind.PORT, PORT_BAND));
+        double edge = maxCoreRadius(device.getType()) * CORTEGE_START;
+        edge = ring(nodes, rings, adapters, SatelliteKind.ADAPTER, ADAPTER_RADIUS + SATELLITE_DRIFT, edge, random, seed);
+        edge = ring(nodes, rings, peripherals, SatelliteKind.PERIPHERAL, PERIPHERAL_RADIUS + SATELLITE_DRIFT, edge, random, seed + 1);
 
-            String evidence = port.getServiceEvidence().isBlank()
-                    ? (port.isServiceVerified() ? "Service confirmé" : "Attribution indicative")
-                    : port.getServiceEvidence();
-            nodes.add(node(random, portId + ":service", portId, port.getName(), evidence,
-                    SatelliteKind.SERVICE, SERVICE_BAND));
+        List<PortEndpoint> ports = device.getEndpoints();
+        if (!ports.isEmpty()) {
+            // Un port et son service forment une seule place : le service tourne à l'intérieur
+            double footprint = Math.max(PORT_RADIUS, SERVICE_ORBIT + SERVICE_RADIUS + SERVICE_DRIFT) + SATELLITE_DRIFT;
+            Orbits orbits = cortegeOrbits(edge, footprint);
+            for (PortEndpoint port : ports) {
+                String portId = "port:" + port.getPortNumber() + ':' + port.getLocalAddress() + ':' + port.getOwner();
+                String detail = port.getOwner() + (port.getLocalAddress().isBlank() ? "" : " · " + port.getLocalAddress());
+                double[] slot = orbits.claim(portId.hashCode(), footprint, SATELLITE_GAP);
+                nodes.add(satellite(random, portId, null, "Port " + port.getPortNumber(), detail,
+                        SatelliteKind.PORT, slot[0], slot[1], spin(slot[2], seed), SATELLITE_DRIFT));
+                String evidence = port.getServiceEvidence().isBlank()
+                        ? (port.isServiceVerified() ? "Service confirmé" : "Attribution indicative")
+                        : port.getServiceEvidence();
+                nodes.add(satellite(random, portId + ":service", portId, port.getName(), evidence,
+                        SatelliteKind.SERVICE, SERVICE_ORBIT, Math.floorMod(portId.hashCode(), 628) / 100.0,
+                        .05 * ((portId.hashCode() & 1) == 0 ? 1 : -1), SERVICE_DRIFT));
+            }
+            rings.addAll(orbits.used());
+            edge = orbits.outermost() + SATELLITE_JITTER / 2 + footprint;
         }
+        double reach = nodes.isEmpty() ? coreRadiusFor(device) * DEVICE_ENVELOPE : edge;
+        return new Cortege(List.copyOf(nodes), List.copyOf(rings), primaryAdapterId, reach);
+    }
 
-        Map<String, Satellite> byId = new LinkedHashMap<>();
-        double reach = 0;
-        for (Satellite node : nodes) {
-            byId.put(node.id(), node);
-            reach = Math.max(reach, Math.hypot(node.homeX(), node.homeY())
-                    + Math.max(node.driftX(), node.driftY()));
+    /** Range une nature d'objets sur ses anneaux, à partir du bord laissé par la précédente. */
+    private static double ring(List<Satellite> nodes, List<Double> rings, List<String[]> items, SatelliteKind kind,
+                               double footprint, double edge, Random random, long seed) {
+        if (items.isEmpty()) {
+            return edge;
         }
-        double core = coreRadiusFor(device);
-        double systemRadius = nodes.isEmpty() ? core * 3 : reach + 1_200;
+        Orbits orbits = cortegeOrbits(edge, footprint);
+        for (String[] item : items) {
+            double[] slot = orbits.claim(item[0].hashCode(), footprint, SATELLITE_GAP);
+            nodes.add(satellite(random, item[0], null, item[1], item[2], kind, slot[0], slot[1],
+                    spin(slot[2], seed), SATELLITE_DRIFT));
+        }
+        rings.addAll(orbits.used());
+        return orbits.outermost() + SATELLITE_JITTER / 2 + footprint;
+    }
 
-        return new Star(device, parent,
-                parent == null ? null : parent.device().getId(),
-                homeX, homeY, drift,
-                0.011 + (Math.abs(device.getId().hashCode()) % 7) * 0.0013,
-                0.008 + (Math.abs(device.getId().hashCode()) % 5) * 0.0017,
-                Math.abs(device.getId().hashCode()) % 628 / 100.0,
-                Math.abs(device.getId().hashCode() >> 3) % 628 / 100.0,
-                core, primaryAdapterId,
-                List.copyOf(nodes), Collections.unmodifiableMap(byId), systemRadius);
+    private static Orbits cortegeOrbits(double edge, double footprint) {
+        return new Orbits(edge + SATELLITE_GAP + footprint + SATELLITE_JITTER / 2,
+                2 * footprint + SATELLITE_GAP + SATELLITE_JITTER, SATELLITE_JITTER, 1);
     }
 
     /**
-     * Tire une position de repos au hasard dans l'anneau de la famille, puis deux
-     * fréquences de dérive volontairement différentes : c'est ce décalage qui
-     * empêche les objets de rester alignés.
+     * Des anneaux à places réservées.
+     *
+     * Chaque anneau est découpé en places égales. Un objet d'encombrement f (corps et dérive
+     * compris) a besoin d'un demi-angle α = (f + écart/2) · π / (2·r), où r est le rayon
+     * intérieur de l'anneau, aplatissement compris ; il réserve assez de places consécutives
+     * pour couvrir 2α. Deux objets qui ne partagent aucune place sont séparés d'un angle
+     * θ ≥ αa + αb, et comme une corde vaut au moins 2θr/π pour θ ≤ π, leurs centres restent à
+     * fa + fb + écart. D'un anneau au suivant, le rayon avance du double du plus gros
+     * encombrement plus l'écart : l'écart radial seul suffit alors, quels que soient les
+     * angles, et les anneaux peuvent tourner à des vitesses différentes.
+     *
+     * Chaque objet réclame d'abord la place tirée de son identifiant, puis les places voisines
+     * de part et d'autre, puis l'anneau suivant : un nouvel objet ne déplace un objet déjà
+     * posé que s'il lui prend exactement sa place.
      */
-    private static Satellite node(Random random, String id, String parentId, String label,
-                                  String detail, SatelliteKind kind, double[] band) {
-        double radius = band[0] + random.nextDouble() * (band[1] - band[0]);
-        double angle = random.nextDouble() * Math.PI * 2;
-        double scale = band == SERVICE_BAND ? 0.22 : 1;
+    private static final class Orbits {
+        private static final double PLACE = 600;
+        private final double first;
+        private final double step;
+        private final double jitter;
+        private final double squash;
+        private final List<boolean[]> taken = new ArrayList<>();
+
+        Orbits(double first, double step, double jitter, double squash) {
+            this.first = first;
+            this.step = step;
+            this.jitter = jitter;
+            this.squash = squash;
+        }
+
+        /** @return { rayon, angle, rayon de l'anneau } */
+        double[] claim(long hash, double footprint, double gap) {
+            long mixed = hash * 0x9E3779B97F4A7C15L;
+            double shake = ((mixed >>> 20) & 0x3FF) / 1023.0 - .5;
+            for (int ring = 0; ; ring++) {
+                double centre = first + ring * step;
+                double inner = (centre - jitter / 2) * squash;
+                while (taken.size() <= ring) {
+                    int places = Math.max(8, (int) Math.floor(Math.PI * 2 * (first + taken.size() * step - jitter / 2) * squash / PLACE));
+                    taken.add(new boolean[places]);
+                }
+                boolean[] places = taken.get(ring);
+                int count = places.length;
+                double width = Math.PI * 2 / count;
+                double half = (footprint + gap / 2) * Math.PI / (2 * inner);
+                int needed = half >= Math.PI / 2 ? count : Math.min(count, (int) Math.ceil(2 * half / width));
+                int preferred = (int) Math.floorMod(mixed >>> 32, (long) count);
+                for (int probe = 0; probe < 2 * count; probe++) {
+                    int offset = (probe + 1) / 2 * (probe % 2 == 0 ? 1 : -1);
+                    int start = Math.floorMod(preferred + offset, count);
+                    if (!free(places, start, needed)) {
+                        continue;
+                    }
+                    for (int i = 0; i < needed; i++) {
+                        places[(start + i) % count] = true;
+                    }
+                    return new double[] { centre + shake * jitter, (start + needed / 2.0) * width, centre };
+                }
+            }
+        }
+
+        private static boolean free(boolean[] places, int start, int needed) {
+            for (int i = 0; i < needed; i++) {
+                if (places[(start + i) % places.length]) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        /** Le rayon du dernier anneau qui porte au moins un objet. */
+        double outermost() {
+            List<Double> used = used();
+            return used.isEmpty() ? first : used.get(used.size() - 1);
+        }
+
+        /** Les rayons des anneaux qui portent au moins un objet. */
+        List<Double> used() {
+            List<Double> used = new ArrayList<>();
+            for (int ring = 0; ring < taken.size(); ring++) {
+                for (boolean place : taken.get(ring)) {
+                    if (place) {
+                        used.add(first + ring * step);
+                        break;
+                    }
+                }
+            }
+            return used;
+        }
+    }
+
+    /** Vitesse d'un anneau : les anneaux proches tournent plus vite, dans un sens propre à l'appareil. */
+    private static double spin(double ringRadius, long seed) {
+        return .01 * Math.sqrt(40_000 / Math.max(10_000, ringRadius)) * ((seed & 1) == 0 ? 1 : -1);
+    }
+
+    private static Satellite satellite(Random shared, String id, String parentId, String label, String detail,
+                                       SatelliteKind kind, double orbit, double angle, double spin, double drift) {
+        // Tiré de l'identifiant seul : un objet qui apparaît ne change pas la danse des autres
+        Random random = new Random(id.hashCode() * 40_503L + 17);
         return new Satellite(id, parentId, label, detail, kind,
-                Math.cos(angle) * radius,
-                Math.sin(angle) * radius * 0.74,
-                (420 + random.nextDouble() * 1_100) * scale,
-                (420 + random.nextDouble() * 1_100) * scale,
+                Math.cos(angle) * orbit, Math.sin(angle) * orbit,
+                drift * (.5 + .5 * random.nextDouble()),
+                drift * (.5 + .5 * random.nextDouble()),
                 0.045 + random.nextDouble() * 0.13,
                 0.045 + random.nextDouble() * 0.13,
                 random.nextDouble() * Math.PI * 2,
-                random.nextDouble() * Math.PI * 2);
+                random.nextDouble() * Math.PI * 2,
+                orbit, angle, spin);
+    }
+
+    private static Star star(Device device, Star parent, double[] offset, Cortege cortege) {
+        Map<String, Satellite> byId = new LinkedHashMap<>();
+        for (Satellite node : cortege.satellites()) {
+            byId.put(node.id(), node);
+        }
+        int hash = device.getId().hashCode();
+        return new Star(device, parent,
+                parent == null ? null : parent.device().getId(),
+                offset[0], offset[1], offset[2],
+                0.011 + (Math.abs(hash) % 7) * 0.0013,
+                0.008 + (Math.abs(hash) % 5) * 0.0017,
+                Math.abs(hash) % 628 / 100.0,
+                Math.abs(hash >> 3) % 628 / 100.0,
+                coreRadiusFor(device), cortege.primaryAdapterId(),
+                cortege.satellites(), Collections.unmodifiableMap(byId),
+                cortege.reach() + 1_200, cortege.rings());
     }
 
     private static double[] bandFor(DeviceType type) {
@@ -458,40 +650,45 @@ public final class ConstellationLayout {
             case GATEWAY_ROUTER -> GATEWAY_BAND;
             case LOCAL_HOST, LAN_PEER -> LAN_BAND;
             case REMOTE_SERVER -> REMOTE_BAND;
+            case BLUETOOTH -> BLUETOOTH_BAND;
         };
     }
 
     /**
      * La taille d'un appareil dit ce que l'on sait de lui.
      *
-     * Tous les appareils avaient le même rayon : la carte affirmait donc qu'ils
-     * pèsent tous pareil, ce qui est faux. Une machine dont on connaît douze ports,
-     * du matériel et un vrai nom n'a pas le même poids qu'une adresse dont on n'a
-     * même pas résolu la carte réseau.
-     *
-     * Le concentrateur domine sa constellation : c'est par lui que tout passe.
+     * Une machine dont on connaît douze ports, du matériel et un vrai nom n'a pas le même
+     * poids qu'une adresse dont on n'a même pas résolu la carte réseau. Le concentrateur
+     * domine sa constellation : c'est par lui que tout passe.
      */
-    private static double coreRadiusFor(Device device) {
-        // Ces rayons sont des tailles vraies, en unités du monde : un appareil garde
-        // la même taille quel que soit le zoom, et grossit donc à l'écran quand on
-        // s'approche, comme un astre sur une carte du ciel.
-        double base = switch (device.getType()) {
-            case GATEWAY_ROUTER -> 5_200;
-            case LOCAL_HOST -> 4_200;
-            case REMOTE_SERVER -> 1_800;
-            case LAN_PEER -> 1_500;
+    /** Le plus gros noyau que peut atteindre un appareil de ce type : base, savoir plafonné, variation maximale. */
+    private static double maxCoreRadius(DeviceType type) {
+        return baseRadius(type) * 2.6 * 1.24;
+    }
+
+    private static double baseRadius(DeviceType type) {
+        return switch (type) {
+            case GATEWAY_ROUTER -> 10_000;
+            case LOCAL_HOST -> 9_000;
+            case REMOTE_SERVER -> 2_900;
+            case LAN_PEER -> 3_800;
+            case BLUETOOTH -> 4_200;
         };
-        double known = device.getEndpoints().size() * 140.0
-                + device.getPeripherals().size() * 110.0
-                + device.getAdapters().size() * 80.0;
-        // Un appareil qui a livré un nom en dit plus qu'une adresse anonyme. Le libellé
-        // de repli commence par « Appareil » ; c'est le seul signal disponible ici.
+    }
+
+    private static double coreRadiusFor(Device device) {
+        // Des tailles vraies, en unités du monde : un appareil grossit à l'écran quand on s'approche
+        double base = baseRadius(device.getType());
+        double known = device.getEndpoints().size() * 220.0
+                + device.getPeripherals().size() * 180.0
+                + device.getAdapters().size() * 130.0;
+        // Le libellé de repli commence par « Appareil » : c'est le seul signal disponible ici
         if (device.getName() != null && !device.getName().startsWith("Appareil")) {
-            known += 420;
+            known += 670;
         }
-        // Une variation propre à chaque appareil, pour que deux voisins également
-        // connus ne soient pas pour autant des jumeaux.
-        double variation = 1 + (Math.abs(device.getId().hashCode()) % 41) / 100.0;
+        // Une variation contenue à 24 %, pour que deux voisins également connus ne soient pas
+        // des jumeaux, sans jamais inverser la différence de savoir
+        double variation = 1 + (Math.abs(device.getId().hashCode()) % 25) / 100.0;
         return (base + Math.min(known, base * 1.6)) * variation;
     }
 
@@ -509,7 +706,7 @@ public final class ConstellationLayout {
     public static double starY(Star star, double seconds) {
         double base = star.parent() == null ? 0 : starY(star.parent(), seconds);
         return base + star.homeY()
-                + star.drift() * 0.74 * Math.sin(star.freqY() * seconds + star.phaseY());
+                + star.drift() * SQUASH * Math.sin(star.freqY() * seconds + star.phaseY());
     }
 
     /** Position de repos absolue, dérive mise à zéro : sert au cadrage et aux étiquettes. */
@@ -531,10 +728,20 @@ public final class ConstellationLayout {
         return star.coreRadius() * EXCLUSION_FACTOR;
     }
 
+    /** Rayon vrai d'un objet du cortège. */
+    public static double satelliteRadius(SatelliteKind kind) {
+        return switch (kind) {
+            case ADAPTER -> ADAPTER_RADIUS;
+            case PERIPHERAL -> PERIPHERAL_RADIUS;
+            case PORT -> PORT_RADIUS;
+            case SERVICE -> SERVICE_RADIUS;
+        };
+    }
+
     /**
-     * Position d'un objet, barrière comprise. Le centre de dérive est l'appareil, ou
-     * le port dont l'objet est le satellite ; puis, si la dérive l'a fait entrer dans
-     * le noyau de l'appareil, il est repoussé sur la limite au lieu de la traverser.
+     * Position d'un objet : il tourne sur son anneau autour de l'appareil, ou autour du
+     * port dont il est le service, et dérive légèrement autour de sa place. Les anneaux
+     * commencent au-delà de la barrière du noyau ; la barrière reste un garde-fou.
      */
     public static double[] position(Star star, Satellite node, double seconds) {
         double centreX;
@@ -549,8 +756,9 @@ public final class ConstellationLayout {
             centreY = anchor[1];
         }
 
-        double x = centreX + node.homeX() + node.driftX() * Math.sin(node.freqX() * seconds + node.phaseX());
-        double y = centreY + node.homeY() + node.driftY() * Math.sin(node.freqY() * seconds + node.phaseY());
+        double angle = node.angle() + node.spin() * seconds;
+        double x = centreX + Math.cos(angle) * node.orbit() + node.driftX() * Math.sin(node.freqX() * seconds + node.phaseX());
+        double y = centreY + Math.sin(angle) * node.orbit() + node.driftY() * Math.sin(node.freqY() * seconds + node.phaseY());
 
         double coreX = starX(star, seconds);
         double coreY = starY(star, seconds);
@@ -575,9 +783,28 @@ public final class ConstellationLayout {
     }
 
     /**
+     * Le segment visible d'un lien entre deux corps : il vise exactement leurs deux
+     * centres et s'arrête au bord de chacun. Renvoie null quand les deux corps se
+     * recouvrent : il n'y a alors rien à tracer.
+     */
+    public static double[] clipBetween(double ax, double ay, double aRadius,
+                                       double bx, double by, double bRadius) {
+        double dx = bx - ax;
+        double dy = by - ay;
+        double length = Math.hypot(dx, dy);
+        if (length <= aRadius + bRadius) {
+            return null;
+        }
+        double ux = dx / length;
+        double uy = dy / length;
+        return new double[] {
+                ax + ux * aRadius, ay + uy * aRadius,
+                bx - ux * bRadius, by - uy * bRadius };
+    }
+
+    /**
      * Force du lien de constellation entre deux appareils : ils se relient quand ils
-     * se rapprochent, comme les objets d'une même famille, et le trait s'éteint
-     * lorsqu'ils s'éloignent.
+     * se rapprochent, et le trait s'éteint lorsqu'ils s'éloignent.
      */
     public static double deviceLinkStrength(double distance) {
         if (distance >= DEVICE_REACH) {

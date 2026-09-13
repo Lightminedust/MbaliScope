@@ -295,10 +295,11 @@ class ConstellationLayoutTest {
 
         assertTrue(map.stars().get(box).coreRadius() > map.stars().get(phone).coreRadius(),
                 "la box doit se distinguer de ses clients");
-        // Une taille vraie, et non un symbole gonfle par le zoom : elle doit dominer
-        // par sa dimension propre, au moins du double de celle d un client.
+        // Une taille vraie, et non un symbole gonfle par le zoom. Le facteur est passe
+        // de 2 a 1,3 deliberement : a 1 500 unites, un client ne faisait que 2 px et
+        // devenait invisible ; il a grandi, et la box domine toujours clairement.
         assertTrue(map.stars().get(box).coreRadius()
-                > map.stars().get(phone).coreRadius() * 2,
+                > map.stars().get(phone).coreRadius() * 1.3,
                 "la box doit dominer par sa taille propre");
     }
 
@@ -309,6 +310,53 @@ class ConstellationLayoutTest {
         assertEquals(0, ConstellationLayout.deviceLinkStrength(ConstellationLayout.SYSTEM_GAP), 1e-9);
         assertTrue(ConstellationLayout.deviceLinkStrength(30_000)
                 > ConstellationLayout.deviceLinkStrength(90_000));
+    }
+
+    @Test
+    void aLinkAimsExactlyAtBothCentresAndStopsAtTheirEdges() {
+        // Defaut vu a l'ecran : le trait entre la box et ce PC etait decale, parce qu'il
+        // partait d'une carte reseau en orbite et non du noyau.
+        double[] segment = ConstellationLayout.clipBetween(0, 0, 10, 100, 40, 20);
+
+        // Les deux extremites sont sur la droite qui joint les centres
+        assertEquals(0, segment[0] * 40 - segment[1] * 100, 1e-9);
+        assertEquals(0, segment[2] * 40 - segment[3] * 100, 1e-9);
+        // et chacune est exactement au bord de son corps
+        assertEquals(10, Math.hypot(segment[0], segment[1]), 1e-9);
+        assertEquals(20, Math.hypot(segment[2] - 100, segment[3] - 40), 1e-9);
+    }
+
+    @Test
+    void twoOverlappingBodiesAreNotLinked() {
+        assertNull(ConstellationLayout.clipBetween(0, 0, 30, 40, 0, 20),
+                "deux corps qui se recouvrent n'ont pas de trait visible entre eux");
+    }
+
+    @Test
+    void bluetoothDevicesOrbitTheMachineThatPairedThemBeyondItsCortege() {
+        Device pc = localHost();
+        Device box = gateway();
+        Device earbuds = new Device("bt:112233445566", "TWS", "Bluetooth", DeviceType.BLUETOOTH);
+        NetworkTopology topology = twoSystems(pc, box);
+        topology.addDevice(earbuds);
+        topology.addLink(new NetworkLink(pc, earbuds, "Bluetooth"));
+
+        Constellation map = ConstellationLayout.compute(topology);
+        Star machine = map.stars().get(pc);
+        Star paired = map.stars().get(earbuds);
+
+        assertEquals(pc.getId(), paired.parentId(), "appaires a ce PC, pas a la box");
+        assertTrue(machine.isSystemRoot(), "ce PC reste un systeme a part entiere");
+        for (double seconds = 0; seconds < 900; seconds += 0.61) {
+            double distance = Math.hypot(
+                    ConstellationLayout.starX(paired, seconds) - ConstellationLayout.starX(machine, seconds),
+                    ConstellationLayout.starY(paired, seconds) - ConstellationLayout.starY(machine, seconds));
+            // Au-dela de tout le cortege de ce PC, sans s'en eloigner demesurement. Les bornes
+            // etaient chiffrees (50 000 - 105 000) quand le cortege tenait dans une bande fixe ;
+            // il est desormais range sur des anneaux, et c'est lui qui fixe ou commence l'orbite.
+            assertTrue(distance > machine.systemRadius() && distance < machine.systemRadius() + 90_000,
+                    "les ecouteurs ont quitte l'orbite de ce PC a t=" + seconds + " : " + distance);
+        }
     }
 
     @Test
@@ -480,5 +528,68 @@ class ConstellationLayoutTest {
         assertEquals(1, map.links().size());
         assertTrue(Math.hypot(map.stars().get(other).homeX(),
                 map.stars().get(other).homeY()) > 40_000, "l espace doit rester vaste");
+    }
+
+    @Test
+    void aCrowdedCortegeNeverOverlapsItself() {
+        // « les objets autour de l'appareil se marchent dessus » : cinquante ports, leurs
+        // services, douze peripheriques et quatre cartes ne doivent jamais se toucher.
+        Device pc = localHost();
+        for (int i = 0; i < 10; i++) {
+            pc.addPeripheral(new Peripheral("Materiel " + i, PeripheralKind.USB, "USB-X" + i));
+        }
+        pc.addAdapter(new NetworkAdapter("eth1", "Ethernet", AdapterKind.ETHERNET, "10.0.0.2", "EE:FF"));
+        pc.addAdapter(new NetworkAdapter("vpn0", "VPN", AdapterKind.VIRTUAL, "10.9.0.2", "11:22"));
+        for (int port = 0; port < 48; port++) {
+            pc.addEndpoint(new PortEndpoint(5000 + port, "TCP", PortType.NETWORK_PHYSICAL, "svc" + port));
+        }
+        Star star = onlyStar(new NetworkTopology(pc));
+        List<Satellite> nodes = star.satellites();
+        assertEquals(4 + 11 + 50 * 2, nodes.size());
+
+        for (double seconds = 0; seconds < 1_200; seconds += 7.3) {
+            double[][] points = new double[nodes.size()][];
+            for (int i = 0; i < nodes.size(); i++) {
+                points[i] = ConstellationLayout.position(star, nodes.get(i), seconds);
+            }
+            for (int i = 0; i < nodes.size(); i++) {
+                double ri = ConstellationLayout.satelliteRadius(nodes.get(i).kind());
+                for (int j = i + 1; j < nodes.size(); j++) {
+                    double rj = ConstellationLayout.satelliteRadius(nodes.get(j).kind());
+                    double distance = Math.hypot(points[i][0] - points[j][0], points[i][1] - points[j][1]);
+                    assertTrue(distance > ri + rj,
+                            nodes.get(i).label() + " touche " + nodes.get(j).label() + " a t=" + seconds);
+                }
+            }
+        }
+    }
+
+    @Test
+    void thirtyClientsOfOneGatewayNeverOverlap() {
+        Device pc = localHost();
+        Device box = gateway();
+        Device[] clients = new Device[30];
+        for (int i = 0; i < clients.length; i++) {
+            clients[i] = peer("192.168.1." + (i + 2));
+            for (int port = 0; port < i % 5; port++) {
+                clients[i].addEndpoint(new PortEndpoint(80 + port, "TCP", PortType.NETWORK_PHYSICAL));
+            }
+        }
+        Constellation map = ConstellationLayout.compute(twoSystems(pc, box, clients));
+
+        for (double seconds = 0; seconds < 900; seconds += 11.1) {
+            for (int i = 0; i < clients.length; i++) {
+                Star a = map.stars().get(clients[i]);
+                for (int j = i + 1; j < clients.length; j++) {
+                    Star b = map.stars().get(clients[j]);
+                    double distance = Math.hypot(
+                            ConstellationLayout.starX(a, seconds) - ConstellationLayout.starX(b, seconds),
+                            ConstellationLayout.starY(a, seconds) - ConstellationLayout.starY(b, seconds));
+                    // 1,6 rayon : les piques comprises
+                    assertTrue(distance > 1.6 * (a.coreRadius() + b.coreRadius()),
+                            clients[i].getId() + " touche " + clients[j].getId() + " a t=" + seconds);
+                }
+            }
+        }
     }
 }

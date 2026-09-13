@@ -34,6 +34,7 @@ import org.mbali.model.NetworkAdapter;
 import org.mbali.model.Peripheral;
 import org.mbali.model.PortEndpoint;
 import org.mbali.model.PortType;
+import org.mbali.model.Presence;
 import org.mbali.service.PortScanner.PortStatus;
 
 /**
@@ -97,7 +98,12 @@ public final class NetworkScanner {
         scan(subnet, gateway,
                 host -> probeDiscovery(host, subnet.localAddress(), gateway, cancelled),
                 host -> probeKnownHost(host, subnet.localAddress(), gateway, cancelled),
-                NeighborTable::read, onFound, onProgress, cancelled);
+                () -> {
+                    // Réveiller le lien avant de lire la table : un appareil en veille y
+                    // figurait vieilli, sans son adresse IPv6.
+                    NeighborTable.wakeLink(subnet.localAddress());
+                    return NeighborTable.read();
+                }, onFound, onProgress, cancelled);
     }
 
     // Sources injectables pour tester la découverte sans balayer un réseau réel.
@@ -286,6 +292,10 @@ public final class NetworkScanner {
             Device renamed = new Device(device.getId(), identity.name(),
                     device.getIpAddress(), device.getType());
             renamed.setMacAddress(device.getMacAddress());
+            renamed.setPresence(device.getPresence());
+            // La preuve du nom voyage désormais avec l'appareil : l'inspecteur dit d'où
+            // vient ce nom, ou pourquoi il manque, au lieu de la jeter ici.
+            renamed.setEvidence(identity.evidence());
             device.getEndpoints().forEach(renamed::addEndpoint);
             device.getAdapters().forEach(renamed::addAdapter);
             device.getPeripherals().forEach(renamed::addPeripheral);
@@ -362,6 +372,10 @@ public final class NetworkScanner {
     private static Device absorb(Device kept, Device other) {
         Device union = new Device(kept.getId(), kept.getName(), kept.getIpAddress(), kept.getType());
         union.setMacAddress(kept.getMacAddress());
+        // Il suffit qu'une adresse de la machine soit active pour que la machine le soit.
+        union.setPresence(kept.getPresence() == Presence.ACTIVE || other.getPresence() == Presence.ACTIVE
+                ? Presence.ACTIVE : Presence.DORMANT);
+        union.setEvidence(kept.getEvidence().isBlank() ? other.getEvidence() : kept.getEvidence());
 
         Set<String> ports = new LinkedHashSet<>();
         Set<NetworkAdapter> adapters = new LinkedHashSet<>();
