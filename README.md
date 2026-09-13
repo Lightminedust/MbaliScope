@@ -8,9 +8,6 @@ MbaliScope looks at two things on your machine and renders each of them as a map
 - **Processus**: the processes running on your computer, drawn as a spacetime of particles. Memory gives each family its size, and measured CPU load gives it colour, speed and a black horizon that bends the space around it.
 
 Both maps follow the same rule: **every visual property comes from a calculation, and anything simulated is labelled as such.** This README documents those calculations.
-
-> **Screenshot**: not included yet. Run the app, capture the window, save it as `docs/screenshot.png` and reference it here.
-
 ---
 
 ## Contents
